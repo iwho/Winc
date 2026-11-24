@@ -347,3 +347,5 @@ cmd-group-edit = 编辑
 cmd-group-find = 查找
 cmd-group-tree = 文件树
 cmd-group-view = 视图
+
+cmd-toggle-agent = 显示或隐藏 Codex Agent

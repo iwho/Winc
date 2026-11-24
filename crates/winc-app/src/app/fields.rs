@@ -21,6 +21,7 @@ impl App {
             Focus::Prompt => self.prompt_field_mut(),
             Focus::GlobalQuery => Some(&mut self.panels.global.query),
             Focus::CommitMessage => Some(&mut self.git.commit.message),
+            Focus::Agent => self.agent.as_mut().map(|panel| &mut panel.field),
             Focus::GlobalReplace => Some(&mut self.panels.global.replace),
             Focus::GlobalInclude => Some(&mut self.panels.global.include),
             Focus::GlobalExclude => Some(&mut self.panels.global.exclude),

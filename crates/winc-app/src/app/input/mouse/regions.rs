@@ -362,6 +362,13 @@ impl App {
 
     /// 返回鼠标所在输入框对应的焦点；只考虑正在显示的输入框。
     pub(in crate::app) fn field_at(&self, x: f32, y: f32) -> Option<Focus> {
+        if self
+            .agent
+            .as_ref()
+            .is_some_and(|panel| panel.shown && panel.field.view.area.contains(x, y))
+        {
+            return Some(Focus::Agent);
+        }
         let visible = [
             (Focus::Search, self.bars.find.open, &self.bars.find.input),
             (

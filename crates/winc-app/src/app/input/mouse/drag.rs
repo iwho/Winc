@@ -102,6 +102,7 @@ impl App {
         self.update_cursor_icon();
 
         match self.pointer.drag {
+            Drag::AgentDivider { grab } => self.resize_agent(x, grab),
             Drag::SearchDialog { grab } => self.move_search_dialog(x, y, grab),
             Drag::SearchDialogEdge { edge, from, rect } => {
                 self.resize_search_dialog((x, y), edge, (from, rect));

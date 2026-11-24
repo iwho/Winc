@@ -444,6 +444,7 @@ impl App {
             PreviewSelected => self.open_selected(true),
 
             ToggleSidebar => self.toggle_sidebar(),
+            ToggleAgent => self.toggle_agent(),
             FocusSidebar => self.focus_sidebar(),
             ShowFiles => self.show_files(),
             IncreaseFontSize => self.step_font_size(Some(true)),

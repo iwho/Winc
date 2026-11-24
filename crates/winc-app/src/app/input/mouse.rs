@@ -71,7 +71,8 @@ impl App {
         let was_scrollbar = matches!(self.pointer.drag, Drag::Scrollbar { .. });
         let was_divider = matches!(
             self.pointer.drag,
-            Drag::Splitter { .. }
+            Drag::AgentDivider { .. }
+                | Drag::Splitter { .. }
                 | Drag::TerminalDivider { .. }
                 | Drag::SplitDivider { .. }
                 | Drag::PaneDivider { .. }
@@ -106,6 +107,27 @@ impl App {
     pub(in crate::app) fn on_wheel_event(&mut self, delta: MouseScrollDelta, phase: TouchPhase) {
         let fresh = self.note_wheel_gesture(delta, phase);
         let (x, y) = self.pointer.mouse;
+        if !self.settings.open
+            && self.overlays.alert.is_none()
+            && self.overlays.form_dialog.is_none()
+            && !self.overlays.picker.open
+            && self.layout.agent.contains(x, y)
+        {
+            let pixels = match delta {
+                MouseScrollDelta::LineDelta(_, lines) => -lines * 60.0,
+                MouseScrollDelta::PixelDelta(p) => {
+                    let scale = self
+                        .frame
+                        .renderer
+                        .as_ref()
+                        .map_or(1.0, Renderer::scale_factor);
+                    -(p.y as f32) / scale
+                }
+            };
+            if self.scroll_agent(x, y, pixels) {
+                return;
+            }
+        }
         if self.search_dialog_part_at(x, y).is_some() || self.docked_part_at(x, y).is_some() {
             let dy = match delta {
                 MouseScrollDelta::LineDelta(_, lines) => -lines * 3.0 * crate::app::PICKER_ROW,

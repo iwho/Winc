@@ -190,6 +190,7 @@ impl Action {
             PreviewSelected => "Open and Keep Focus",
             FindInFolder => "Find in Folder",
             ToggleSidebar => "Toggle Sidebar",
+            ToggleAgent => "Toggle Codex Agent",
             FocusSidebar => "Focus Sidebar",
             ShowFiles => "Show Explorer",
             ShowOutline => "Show Outline",

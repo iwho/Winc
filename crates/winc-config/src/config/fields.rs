@@ -69,6 +69,7 @@ pub(super) const SECTIONS: &[(&str, &[Field])] = &[
     ("latex", LATEX),
     ("update", UPDATE),
     ("terminal", TERMINAL),
+    ("agent", AGENT),
     ("vim", VIM),
     ("git", GIT),
     ("network", NETWORK),
@@ -583,6 +584,11 @@ const VIM: &[Field] = &[
             Some(Json::Array(config.vim_keys.iter().map(item).collect()))
         },
     },
+];
+
+const AGENT: &[Field] = &[
+    bool_field!("enabled", agent_enabled),
+    string_field!("executable", agent_executable),
 ];
 
 /// `terminal` 一节。

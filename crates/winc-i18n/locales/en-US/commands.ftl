@@ -347,3 +347,5 @@ cmd-group-edit = Edit
 cmd-group-find = Find
 cmd-group-tree = File Tree
 cmd-group-view = View
+
+cmd-toggle-agent = Show or Hide Codex Agent

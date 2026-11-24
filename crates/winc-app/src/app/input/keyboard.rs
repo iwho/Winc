@@ -167,6 +167,24 @@ impl App {
             | Focus::GlobalExclude => self.on_key_panel_field(event, &base, cmd),
             Focus::Results => self.on_key_results(event),
             Focus::CommitMessage => self.on_key_commit_message(event, &base, cmd),
+            Focus::Agent
+                if event.logical_key == Key::Named(NamedKey::Enter)
+                    && self.ime.field_preedit.is_empty() =>
+            {
+                if cmd {
+                    self.agent_send();
+                } else {
+                    self.edit_field(|field| field.insert("\n"));
+                }
+            }
+            Focus::Agent
+                if event.logical_key == Key::Named(NamedKey::Escape)
+                    && self.ime.field_preedit.is_empty() =>
+            {
+                self.toggle_agent()
+            }
+            Focus::Agent if cmd && base == "v" => self.paste(),
+            Focus::Agent => self.on_key_field(event, &base, cmd),
             Focus::CommitList => self.on_key_commit_list(event),
             Focus::Outline => self.outline_key(&event.logical_key),
             Focus::LogFilter => self.on_key_log_filter(event, &base, cmd),

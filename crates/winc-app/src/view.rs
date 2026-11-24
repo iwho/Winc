@@ -25,6 +25,7 @@ use crate::keymap::{self, Action};
 use crate::layout::{SearchParts, drawn_scroll, drawn_scroll_line, scrollbar_thumb};
 use crate::theme::*;
 
+pub(crate) mod agent;
 mod alert;
 mod controls;
 mod dialog;
@@ -173,6 +174,7 @@ pub fn draw(app: &mut App, frame: &mut Frame<'_>) {
     // 侧栏开关和窗口按钮画在终端之上：面板在右边、最大化且侧栏收起时伸到它们下面。
     draw_sidebar_button(app, frame);
     draw_window_controls(app, frame);
+    agent::draw(app, frame);
     draw_status(app, frame);
     draw_island_corners(app, frame, !covered);
     // 以下都是浮在内容之上的面板、菜单和提示，底色保持不透明。

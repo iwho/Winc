@@ -21,6 +21,7 @@ catalog![
     "commands",
     "editor",
     "workspace",
+    "agent",
     "git",
     "terminal",
     "preview",

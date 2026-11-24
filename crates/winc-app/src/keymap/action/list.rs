@@ -191,6 +191,7 @@ pub const ACTIONS: &[Action] = {
         PreviewSelected,
         FindInFolder,
         ToggleSidebar,
+        ToggleAgent,
         FocusSidebar,
         ShowFiles,
         ShowOutline,

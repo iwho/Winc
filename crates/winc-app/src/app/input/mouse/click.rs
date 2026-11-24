@@ -27,6 +27,16 @@ impl App {
             return;
         }
 
+        if button == MouseButton::Left
+            && !self.settings.open
+            && self.overlays.form_dialog.is_none()
+            && !self.overlays.picker.open
+            && self.preview.markdown.diagram.is_none()
+            && self.agent_click(x, y)
+        {
+            return;
+        }
+
         // 点在前台以外的窗格里：先把它换到前台，这次按下按它的位置处理。
         if let Some(pane) = self.background_pane_at(x, y)
             && self.pane_divider_at(x, y).is_none()

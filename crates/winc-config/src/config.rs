@@ -192,6 +192,10 @@ pub struct Config {
     pub vim_keys: Vec<VimMapping>,
     /// 是否启用终端模块（编辑区下方的终端面板），默认为否。
     pub terminal_enabled: Option<bool>,
+    /// Enables the native Codex panel. Enabled by default and started on demand.
+    pub agent_enabled: Option<bool>,
+    /// Explicit path to the Codex executable, from user settings only.
+    pub agent_executable: Option<String>,
     /// 终端的等宽字体，写法同 [`Config::editor_font`]；未设置时与编辑区相同。
     pub terminal_font: Option<String>,
     /// 终端的字号（点）；未设置时用编辑区的默认字号，不随编辑区字号变化。

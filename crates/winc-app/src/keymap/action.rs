@@ -235,6 +235,7 @@ pub enum Action {
     FindInFolder,
 
     ToggleSidebar,
+    ToggleAgent,
     FocusSidebar,
     ShowFiles,
     ShowOutline,
@@ -607,6 +608,7 @@ impl Action {
             PreviewSelected => t!("cmd-preview-selected"),
             FindInFolder => t!("cmd-find-in-folder"),
             ToggleSidebar => t!("cmd-toggle-sidebar"),
+            ToggleAgent => t!("cmd-toggle-agent"),
             FocusSidebar => t!("cmd-focus-sidebar"),
             ShowFiles => t!("cmd-show-files"),
             ShowOutline => t!("cmd-show-outline"),
@@ -867,6 +869,7 @@ impl Action {
             | PreviewSelected
             | FindInFolder => Group::Tree,
             ToggleSidebar
+            | ToggleAgent
             | FocusSidebar
             | ShowFiles
             | ShowOutline

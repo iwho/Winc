@@ -4,6 +4,7 @@
 //! `view/` 读取这些状态绘制一帧。事件从 `winit` 的事件循环进入，经 `keyboard`、`mouse` 转成
 //! [`Action`](crate::keymap::Action)，或直接修改状态。
 
+pub(crate) mod agent;
 pub(crate) mod animation;
 pub(crate) mod diff;
 pub(crate) mod editor;
@@ -132,6 +133,8 @@ type OrderedTask = Box<dyn FnOnce() + Send>;
 /// 后台线程和系统回调（面板、菜单、提示框）送回事件循环的事件。
 #[derive(Debug)]
 pub enum UserEvent {
+    /// A batch of Codex events is ready.
+    Agent,
     /// 打开或另存为面板已关闭；取消时路径为 `None`。
     Picked(Pick, Option<PathBuf>),
     /// 全局搜索产生了新结果，或已搜索完成。
@@ -462,6 +465,8 @@ pub enum Focus {
     SettingsSearch,
     /// 侧栏提交视图的提交信息输入框。
     CommitMessage,
+    /// Multiline input for the Codex panel.
+    Agent,
     /// 侧栏提交视图的改动列表。
     CommitList,
     /// 文件视图底部大纲的符号列表。
@@ -726,6 +731,9 @@ impl Hover {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Drag {
     None,
+    AgentDivider {
+        grab: f32,
+    },
     /// 拖动设置卡片的标题行；`grab` 是按下处相对卡片左上角的位置。
     SettingsCard {
         grab: (f32, f32),
@@ -919,6 +927,8 @@ pub struct App {
     pub editor: Editor,
     /// 终端面板（终端模块）。
     pub(crate) terminal: terminal::TerminalPanel,
+    /// Allocated when the Codex panel first opens.
+    pub(crate) agent: Option<Box<agent::Panel>>,
     /// 当前目录的运行配置。
     pub(crate) run: terminal::run::RunConfigs,
     /// 当前生效的配置。

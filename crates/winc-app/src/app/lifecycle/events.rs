@@ -489,6 +489,7 @@ impl App {
             #[cfg(all(unix, not(target_os = "macos")))]
             UserEvent::PickFailed(kind, error) => self.pick_failed(kind, error.as_deref()),
             UserEvent::Searched => self.poll_global(),
+            UserEvent::Agent => self.poll_agent(),
             UserEvent::Definitions => self.poll_definitions(),
             UserEvent::FilesChanged => self.files_changed(),
             UserEvent::GitQuestion => self.poll_git_questions(),

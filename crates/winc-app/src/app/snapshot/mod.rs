@@ -18,6 +18,7 @@ use crate::layout::{
     row_actions, scrollbar_thumb, theme_tile,
 };
 
+mod agent;
 mod animation;
 mod editor;
 #[cfg(unix)]
