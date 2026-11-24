@@ -490,6 +490,9 @@ impl App {
             UserEvent::PickFailed(kind, error) => self.pick_failed(kind, error.as_deref()),
             UserEvent::Searched => self.poll_global(),
             UserEvent::Agent => self.poll_agent(),
+            UserEvent::AgentPath(root, real, link, diff) => {
+                self.finish_agent_link(root, real, link, diff)
+            }
             UserEvent::Definitions => self.poll_definitions(),
             UserEvent::FilesChanged => self.files_changed(),
             UserEvent::GitQuestion => self.poll_git_questions(),

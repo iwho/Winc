@@ -192,6 +192,8 @@ pub const ACTIONS: &[Action] = {
         FindInFolder,
         ToggleSidebar,
         ToggleAgent,
+        AgentAttachFile,
+        AgentAttachSelection,
         FocusSidebar,
         ShowFiles,
         ShowOutline,

@@ -4,7 +4,7 @@ use winc_agent::{ApprovalKind, ItemKind};
 use winc_preview::markdown::{Block, Inline};
 
 use crate::app::Focus;
-use crate::app::agent::{Connection, Hit, Panel};
+use crate::app::agent::{Connection, Hit, Link, Panel};
 use crate::layout::wrap_text;
 
 use super::*;
@@ -86,7 +86,7 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         let line = Rect::new(body.x, status_top + ROW * i as f32, body.w, ROW);
         ui_text(frame, app, line.x, line, text, status_color, body);
     }
-    let top = status_top + ROW * rows.len().min(3) as f32 + 4.0;
+    let mut top = status_top + ROW * rows.len().min(3) as f32 + 4.0;
 
     let focused = app.focus == Focus::Agent;
     let input_h = 62.0_f32.min((body.h * 0.22).max(20.0));
@@ -94,7 +94,20 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     let input = Rect::new(body.x, footer.y - input_h - 4.0, body.w, input_h);
     let send = Rect::new(footer.right() - 66.0, footer.y, 66.0, footer.h);
     let stop = Rect::new(send.x - 70.0, footer.y, 64.0, footer.h);
+    let action_y = input.y - 27.0;
+    let attach_file = Rect::new(body.x, action_y, 64.0, 22.0);
+    let attach_selection = Rect::new(attach_file.right() + 4.0, action_y, 75.0, 22.0);
+    let changes = Rect::new(body.right() - 67.0, action_y, 67.0, 22.0);
     let (can_send, can_stop) = (panel.can_send(), panel.can_stop());
+    let attachment_path = panel
+        .attachment
+        .as_ref()
+        .map(|attached| attached.path().to_owned());
+    let change_label = if panel.show_changes {
+        t!("agent-chat")
+    } else {
+        t!("agent-changes")
+    };
     {
         let mut actions = Actions {
             app,
@@ -103,6 +116,50 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         };
         actions.button(send, t!("agent-send"), Hit::Send, true, can_send);
         actions.button(stop, t!("agent-stop"), Hit::Stop, false, can_stop);
+        if changes.x >= attach_selection.right() {
+            actions.button(
+                attach_file,
+                t!("agent-attach-file"),
+                Hit::Attach(false),
+                false,
+                true,
+            );
+            actions.button(
+                attach_selection,
+                t!("agent-attach-selection"),
+                Hit::Attach(true),
+                false,
+                true,
+            );
+            actions.button(
+                changes,
+                change_label,
+                Hit::Changes,
+                panel.show_changes,
+                true,
+            );
+        }
+        if let Some(path) = &attachment_path
+            && send.x - footer.x >= 138.0
+        {
+            let remove = Rect::new(footer.x, footer.y, 63.0, footer.h);
+            actions.button(remove, t!("agent-detach"), Hit::Detach, false, true);
+            let bounds = Rect::new(
+                remove.right() + 3.0,
+                footer.y,
+                (stop.x - remove.right() - 6.0).max(0.0),
+                footer.h,
+            );
+            ui_text(
+                actions.frame,
+                app,
+                bounds.x,
+                bounds,
+                path,
+                p.text_muted,
+                bounds,
+            );
+        }
     }
     frame.rect_clipped(input, p.group_bg, 6.0, body);
     let field = input.inset(6.0, 2.0);
@@ -119,15 +176,83 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     if focused {
         app.ime.cursor = cursor;
     }
-    let area = Rect::new(body.x, top, body.w, (input.y - top - 6.0).max(0.0));
+    top = top.min(action_y);
+    let area = Rect::new(body.x, top, body.w, (action_y - top - 6.0).max(0.0));
     if area.h <= 0.0 {
         return;
     }
     if panel.approval().is_some() {
         draw_approval(app, frame, panel, area);
+    } else if panel.show_changes {
+        draw_changes(app, frame, panel, area);
     } else {
         draw_chat(app, frame, panel, area);
     }
+}
+
+fn draw_changes(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
+    let Some(changes) = panel.changes().filter(|changes| !changes.is_empty()) else {
+        let row = Rect::new(area.x, area.y, area.w, ROW);
+        ui_text(
+            frame,
+            app,
+            row.x,
+            row,
+            t!("agent-change-empty"),
+            app.palette.text_muted,
+            area,
+        );
+        panel.viewport = area;
+        panel.max_scroll = 0.0;
+        return;
+    };
+    let stride = ROW * 2.0 + 5.0;
+    let max = (changes.len() as f32 * stride - area.h).max(0.0);
+    let scroll = panel.scroll.min(max);
+    let start = (scroll / stride) as usize;
+    let mut hits = Vec::new();
+    let mut actions = Actions {
+        app,
+        frame,
+        hits: &mut hits,
+    };
+    for (index, (path, reported)) in changes.iter().enumerate().skip(start) {
+        let y = area.y + index as f32 * stride - scroll;
+        if y >= area.bottom() {
+            break;
+        }
+        let link = Link::from_path(path.clone());
+        let label = panel
+            .root
+            .as_deref()
+            .and_then(|root| path.strip_prefix(root).ok())
+            .unwrap_or(path)
+            .display()
+            .to_string();
+        let open = Rect::new(area.x, y, (area.w - 67.0).max(0.0), ROW).intersect(area);
+        let diff = Rect::new(area.right() - 63.0, y, 63.0, ROW).intersect(area);
+        actions.button(open, &label, Hit::Open(link.clone(), false), false, true);
+        actions.button(diff, t!("agent-diff"), Hit::Open(link, true), false, true);
+        let row = Rect::new(area.x + 5.0, y + ROW, area.w - 5.0, ROW);
+        let tag = if *reported {
+            t!("agent-change-reported")
+        } else {
+            t!("agent-change-observed")
+        };
+        ui_text(
+            actions.frame,
+            app,
+            row.x,
+            row,
+            tag,
+            app.palette.text_muted,
+            area,
+        );
+    }
+    panel.hits.extend(hits);
+    panel.viewport = area;
+    panel.max_scroll = max;
+    panel.scroll = scroll;
 }
 
 fn draw_approval(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
@@ -300,6 +425,12 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                 if y >= area.bottom() {
                     break;
                 }
+                if let Some(link) = &line.link {
+                    let hit = Rect::new(block.x + 4.0, y, block.w - 8.0, ROW).intersect(area);
+                    if hit.h > 0.0 {
+                        actions.hits.push((hit, Hit::Open(link.clone(), false)));
+                    }
+                }
                 if let Some(block_index) = line.copy {
                     let button = Rect::new(block.right() - 82.0, y, 78.0, ROW).intersect(area);
                     actions.button(
@@ -345,6 +476,7 @@ struct Line {
     text: String,
     font: FontKind,
     copy: Option<usize>,
+    link: Option<Link>,
     heading: bool,
 }
 
@@ -365,6 +497,7 @@ fn wrap_lines(
                 text: text.to_owned(),
                 font,
                 copy: None,
+                link: None,
                 heading: false,
             })
         })
@@ -423,7 +556,33 @@ fn blocks(
     lines: &mut Vec<Line>,
 ) {
     fn inline(frame: &mut Frame<'_>, app: &App, text: &Inline, width: f32) -> Vec<Line> {
-        wrap_lines(frame, app, &text.text, width, FontKind::Ui)
+        let mut lines = wrap_lines(frame, app, &text.text, width, FontKind::Ui);
+        let mut seen = Vec::new();
+        for link in text
+            .links
+            .iter()
+            .filter_map(|url| Link::parse(url, true))
+            .chain(
+                text.text
+                    .split_whitespace()
+                    .filter_map(|word| Link::parse(word, false)),
+            )
+            .take(8)
+        {
+            if seen.contains(&link) {
+                continue;
+            }
+            seen.push(link.clone());
+            let label = link.label();
+            lines.push(Line {
+                text: label,
+                font: FontKind::Ui,
+                copy: None,
+                link: Some(link),
+                heading: false,
+            });
+        }
+        lines
     }
     for (index, block) in content.iter().enumerate() {
         match block {
@@ -440,6 +599,7 @@ fn blocks(
                     font: FontKind::Mono,
                     copy: top_level.then_some(index),
                     heading: true,
+                    link: None,
                 });
                 lines.extend(wrap_lines(frame, app, text, width, FontKind::Mono));
             }
@@ -485,6 +645,7 @@ fn blocks(
                 font: FontKind::Ui,
                 copy: None,
                 heading: true,
+                link: None,
             }),
         }
     }
@@ -498,7 +659,7 @@ fn paint_lines(frame: &mut Frame<'_>, app: &App, lines: &[Line], x: f32, top: f3
             break;
         }
         let rect = Rect::new(x, y, (clip.right() - x - 5.0).max(0.0), ROW);
-        let color = if line.heading {
+        let color = if line.heading || line.link.is_some() {
             app.palette.accent
         } else {
             app.palette.text

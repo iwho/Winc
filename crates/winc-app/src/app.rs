@@ -135,6 +135,8 @@ type OrderedTask = Box<dyn FnOnce() + Send>;
 pub enum UserEvent {
     /// A batch of Codex events is ready.
     Agent,
+    /// Validated a project-local path from a Codex reply.
+    AgentPath(PathBuf, Option<PathBuf>, agent::Link, bool),
     /// 打开或另存为面板已关闭；取消时路径为 `None`。
     Picked(Pick, Option<PathBuf>),
     /// 全局搜索产生了新结果，或已搜索完成。

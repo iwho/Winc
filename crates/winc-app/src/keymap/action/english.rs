@@ -191,6 +191,8 @@ impl Action {
             FindInFolder => "Find in Folder",
             ToggleSidebar => "Toggle Sidebar",
             ToggleAgent => "Toggle Codex Agent",
+            AgentAttachFile => "Attach Current File to Codex",
+            AgentAttachSelection => "Attach Selection to Codex",
             FocusSidebar => "Focus Sidebar",
             ShowFiles => "Show Explorer",
             ShowOutline => "Show Outline",

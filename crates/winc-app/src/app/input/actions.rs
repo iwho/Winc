@@ -445,6 +445,8 @@ impl App {
 
             ToggleSidebar => self.toggle_sidebar(),
             ToggleAgent => self.toggle_agent(),
+            AgentAttachFile => self.agent_attach(false),
+            AgentAttachSelection => self.agent_attach(true),
             FocusSidebar => self.focus_sidebar(),
             ShowFiles => self.show_files(),
             IncreaseFontSize => self.step_font_size(Some(true)),

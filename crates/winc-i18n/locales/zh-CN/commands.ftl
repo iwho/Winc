@@ -349,3 +349,5 @@ cmd-group-tree = 文件树
 cmd-group-view = 视图
 
 cmd-toggle-agent = 显示或隐藏 Codex Agent
+cmd-agent-attach-file = Codex：附加当前文件
+cmd-agent-attach-selection = Codex：附加选区

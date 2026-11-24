@@ -349,3 +349,5 @@ cmd-group-tree = File Tree
 cmd-group-view = View
 
 cmd-toggle-agent = Show or Hide Codex Agent
+cmd-agent-attach-file = Codex: Attach Current File
+cmd-agent-attach-selection = Codex: Attach Selection

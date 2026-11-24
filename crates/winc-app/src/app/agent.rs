@@ -1,6 +1,9 @@
 //! Window-owned state and event handling for the native Codex panel.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+
+mod editor;
+pub(crate) use editor::Link;
 
 use winc_agent::{
     AgentProvider, Approval, CodexProvider, Command, DeltaKind, Event, Failure, Item, ItemKind,
@@ -44,6 +47,8 @@ struct Conversation {
     stop_request: Option<u64>,
     status: Option<TurnStatus>,
     tokens: u64,
+    changes: BTreeMap<PathBuf, bool>,
+    change_turn: Option<TurnKey>,
 }
 
 impl Conversation {
@@ -56,6 +61,8 @@ impl Conversation {
             stop_request: None,
             status: None,
             tokens: 0,
+            changes: BTreeMap::new(),
+            change_turn: None,
         }
     }
 
@@ -97,6 +104,10 @@ pub(crate) enum Hit {
     CopyApproval,
     Expand(usize),
     Decide(u64, bool),
+    Attach(bool),
+    Detach,
+    Changes,
+    Open(Link, bool),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -119,6 +130,8 @@ pub(crate) struct Panel {
     pub(crate) scroll: f32,
     pub(crate) max_scroll: f32,
     pub(crate) follow: bool,
+    pub(crate) attachment: Option<editor::Attachment>,
+    pub(crate) show_changes: bool,
     provider: Option<CodexProvider>,
     conversations: HashMap<String, Conversation>,
     selected: Option<String>,
@@ -140,6 +153,8 @@ impl Panel {
             scroll: 0.0,
             max_scroll: 0.0,
             follow: true,
+            attachment: None,
+            show_changes: false,
             provider: None,
             conversations: HashMap::new(),
             selected: None,
@@ -160,6 +175,10 @@ impl Panel {
         self.current_mut().map(|session| &mut session.cards)
     }
 
+    pub(crate) fn changes(&self) -> Option<&BTreeMap<PathBuf, bool>> {
+        self.current().map(|session| &session.changes)
+    }
+
     pub(crate) fn busy(&self) -> bool {
         self.current()
             .is_some_and(|s| s.running.is_some() || s.send_request.is_some())
@@ -177,7 +196,7 @@ impl Panel {
         self.connection == Connection::Ready
             && self.opening.is_none()
             && !self.busy()
-            && !self.field.text().trim().is_empty()
+            && (!self.field.text().trim().is_empty() || self.attachment.is_some())
     }
 
     pub(crate) fn can_stop(&self) -> bool {
@@ -253,9 +272,13 @@ impl Panel {
             return;
         };
         let text = self.field.text().to_owned();
+        let mut prompt = text.clone();
+        if let Some(attachment) = &self.attachment {
+            attachment.append_to(&mut prompt);
+        }
         let command = Command::Send {
             session: session.session.id.clone(),
-            text: text.clone(),
+            text: prompt,
             model: None,
             effort: None,
         };
@@ -355,8 +378,13 @@ impl Panel {
                             && self.field.text() == sent
                         {
                             self.field.set_text("");
+                            self.attachment = None;
                         }
                         session.send_request = None;
+                    }
+                    if session.change_turn.as_ref() != Some(&turn) {
+                        session.change_turn = Some(turn.clone());
+                        session.changes.clear();
                     }
                     session.running = Some(turn);
                     session.status = Some(TurnStatus::Running);
@@ -372,7 +400,16 @@ impl Panel {
                 }
             }
             Event::Item(turn, item, done) => {
+                let files =
+                    if done && item.kind == ItemKind::FileChange && item.status == "completed" {
+                        editor::reported_files(self.root.as_deref(), &item.files)
+                    } else {
+                        Vec::new()
+                    };
                 if let Some(session) = self.conversations.get_mut(&turn.session) {
+                    for file in files {
+                        session.note_change(&turn, file, true);
+                    }
                     let card = session.card(turn, item.id.clone(), item.kind);
                     let mut item = item;
                     if item.output.is_empty() {
@@ -502,6 +539,7 @@ impl App {
             panel.error = Some(t!("agent-remote").into());
             return;
         }
+        panel.root = Some(root.clone());
         let Some(proxy) = self.link.proxy.clone() else {
             return;
         };
@@ -526,11 +564,21 @@ impl App {
             return;
         };
         let mut hidden_approval = false;
+        let mut touched = Vec::new();
         for event in provider.drain() {
             hidden_approval |= !panel.shown && matches!(event, Event::Approval(_));
+            if let Event::Item(_, item, true) = &event
+                && item.kind == ItemKind::FileChange
+            {
+                touched.extend(editor::reported_files(panel.root.as_deref(), &item.files));
+            }
             panel.event(event);
         }
-        if panel.shown {
+        let shown = panel.shown;
+        if !touched.is_empty() {
+            self.sync_documents(|path| touched.iter().any(|changed| changed == path));
+        }
+        if shown {
             self.request_redraw();
         } else if hidden_approval {
             self.flash(t!("agent-hidden-approval"));
@@ -670,6 +718,13 @@ impl App {
                         card.expanded = !card.expanded;
                     }
                 }
+                Hit::Attach(selection) => self.agent_attach(selection),
+                Hit::Detach => panel.attachment = None,
+                Hit::Changes => {
+                    panel.show_changes = !panel.show_changes;
+                    panel.scroll = 0.0;
+                }
+                Hit::Open(link, diff) => self.agent_open_link(link, diff),
                 Hit::Decide(approval, accept) => {
                     panel.submit(Command::Approve { approval, accept });
                 }

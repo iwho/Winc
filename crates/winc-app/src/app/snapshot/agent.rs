@@ -41,3 +41,21 @@ fn agent_configuration_hides_the_entry_point() {
     app.toggle_agent();
     assert!(app.agent.is_none());
 }
+
+#[test]
+fn agent_attaches_the_editor_selection_and_opens_local_references() {
+    let root = sample_folder("agent-context");
+    let mut app = app_with(&root, false);
+    let root = app.editor.workspace.as_ref().unwrap().root.clone();
+    app.open_path(&root.join("short.rs"));
+    app.go_to(1, 4, 7);
+    app.agent_attach(true);
+    let panel = app.agent.as_ref().unwrap();
+    assert_eq!(panel.attachment.as_ref().unwrap().path(), "short.rs");
+
+    let link = crate::app::agent::Link::parse("a.txt:2:5", true).unwrap();
+    app.finish_agent_link(root.clone(), Some(root.join("a.txt")), link, false);
+    let doc = app.editor.active().unwrap();
+    assert_eq!(doc.name(), "a.txt");
+    assert_eq!(doc.text().pos_to_line_col(doc.selection.head), (1, 4));
+}
