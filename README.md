@@ -64,6 +64,8 @@ Image and SVG previews zoom like the PDF preview: hold Ctrl (⌘ on macOS) and s
 press Ctrl/⌘ with `+`, `-` or `0`; the point under the pointer stays in place. Scroll or drag a
 zoomed image to pan, and double-click to fit it again. This also works in the SVG split preview.
 
+The native Codex panel is available for local projects. See [Codex setup and architecture](crates/winc-agent/README.md).
+
 ## Platforms
 
 | Platform | Requirements | Package |

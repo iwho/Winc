@@ -388,6 +388,8 @@ fn round_trips_through_json() {
             to: "<Esc>".to_owned(),
         }],
         terminal_enabled: Some(true),
+        agent_enabled: Some(false),
+        agent_executable: Some("/opt/homebrew/bin/codex".to_owned()),
         terminal_font: Some("Menlo".to_owned()),
         terminal_size: Some(12.0),
         terminal_font_weight: Some(450),

@@ -63,7 +63,7 @@ impl CodexProvider {
                     match out.try_send(events) {
                         Ok(()) => {}
                         Err(TrySendError::Full(events)) => {
-                            let _ = out.send(events).map_err(|_| ())?;
+                            out.send(events).map_err(|_| ())?;
                         }
                         Err(TrySendError::Disconnected(_)) => return Err(()),
                     }
@@ -133,7 +133,7 @@ fn supervise(
     shutdown: &Shutdown,
     publish: &impl Fn(Vec<Event>) -> Result<(), ()>,
 ) -> Result<(), Failure> {
-    let root = root.canonicalize().map_err(|_| Failure::Workspace)?;
+    let root = winc_config::files::canonicalize(root).map_err(|_| Failure::Workspace)?;
     if root.to_str().is_none() || !root.is_dir() {
         return Err(Failure::Workspace);
     }
@@ -265,8 +265,7 @@ fn supervise(
     drop(child);
     drop(wire_out);
     drop(wire_in);
-    // Cleanup is outside the event loop. Detached descendants can retain pipes
-    // on platforms without process groups, so never wait on those indefinitely.
+    // The supervisor reaps the process and joins the pipe workers outside the event loop.
     for worker in workers {
         if cfg!(any(unix, windows)) || worker.is_finished() {
             let _ = worker.join();
@@ -281,8 +280,7 @@ fn codex_path(configured: Option<PathBuf>) -> Result<PathBuf, Failure> {
         if !configured.is_absolute() {
             return Err(Failure::ExecutableNotFound);
         }
-        return configured
-            .canonicalize()
+        return winc_config::files::canonicalize(configured)
             .map_err(|_| Failure::ExecutableNotFound);
     }
     let path = std::env::var_os("PATH").unwrap_or_default();

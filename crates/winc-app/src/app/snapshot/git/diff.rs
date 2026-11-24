@@ -1329,3 +1329,21 @@ fn folding_an_unchanged_run_in_a_diff_is_applied_when_its_transition_ends() {
     assert!(app.motion.diff_fold.is_none() && !open(&app, gap));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_codex_path_opens_the_existing_diff_and_preserves_the_editor_buffer() {
+    let Some((mut app, root)) = git_app("agent-diff", false) else {
+        return;
+    };
+    let file = root.join("src/main.rs");
+    app.open_path(&file);
+    let document = app.editor.active().unwrap().id;
+    app.run(winc_editor::Command::Insert("// unsaved\n".into()));
+    let link = crate::app::agent::Link::parse("src/main.rs", true).unwrap();
+    app.finish_agent_link(root, Some(file), link, true);
+
+    assert!(app.editor.active().unwrap().diff.is_some());
+    let source = app.editor.document(document).unwrap();
+    assert!(source.is_dirty());
+    assert!(source.text().substring(0, 11).starts_with("// unsaved"));
+}

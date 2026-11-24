@@ -144,8 +144,16 @@ pub(crate) enum Connection {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct PanelRects {
+    pub(crate) body: Rect,
+    pub(crate) divider: Rect,
+    pub(crate) button: Rect,
+}
+
 pub(crate) struct Panel {
     pub(crate) shown: bool,
+    pub(crate) rects: PanelRects,
     pub(crate) width: f32,
     pub(crate) field: TextField,
     pub(crate) connection: Connection,
@@ -173,6 +181,7 @@ impl Panel {
     fn new() -> Self {
         Self {
             shown: true,
+            rects: PanelRects::default(),
             width: 390.0,
             field: TextField::multiline(),
             connection: Connection::Unavailable,
@@ -264,6 +273,47 @@ impl Panel {
                 Some(TurnStatus::Running) => t!("agent-running"),
                 None => t!("agent-ready"),
             },
+        }
+    }
+
+    fn limit_transcripts(&mut self) {
+        const CONVERSATION_BYTES: usize = 8 * 1024 * 1024;
+        const PANEL_BYTES: usize = 32 * 1024 * 1024;
+        let bytes = |card: &Card| card.item.text.len() + card.item.output.len();
+        let mut total = 0;
+        for session in self.conversations.values_mut() {
+            let mut size: usize = session.cards.iter().map(bytes).sum();
+            while size > CONVERSATION_BYTES {
+                if let Some(card) = session.cards.pop_front() {
+                    size -= bytes(&card);
+                }
+            }
+            total += size;
+        }
+        if total > PANEL_BYTES {
+            for session in self.conversations.values_mut().filter(|session| {
+                self.selected.as_ref() != Some(&session.session.id) && session.running.is_none()
+            }) {
+                while total > PANEL_BYTES {
+                    let Some(card) = session.cards.pop_front() else {
+                        break;
+                    };
+                    total -= bytes(&card);
+                }
+            }
+        }
+        while total > PANEL_BYTES {
+            let Some(session) = self
+                .conversations
+                .values_mut()
+                .max_by_key(|s| s.cards.len())
+            else {
+                break;
+            };
+            let Some(card) = session.cards.pop_front() else {
+                break;
+            };
+            total -= bytes(&card);
         }
     }
 
@@ -488,8 +538,14 @@ impl Panel {
                         Vec::new()
                     };
                 if let Some(session) = self.conversations.get_mut(&turn.session) {
-                    for file in files {
-                        session.note_change(&turn, file, true);
+                    if session
+                        .change_turn
+                        .as_ref()
+                        .is_none_or(|active| active == &turn)
+                    {
+                        for file in files {
+                            session.note_change(&turn, file, true);
+                        }
                     }
                     let card = session.card(turn, item.id.clone(), item.kind);
                     let mut item = item;
@@ -537,6 +593,14 @@ impl Panel {
                 }
             }
             Event::Approval(approval) => {
+                if let Some(known) = self
+                    .approvals
+                    .iter_mut()
+                    .find(|known| known.id == approval.id)
+                {
+                    *known = approval;
+                    return;
+                }
                 if self.selected.as_ref() == Some(&approval.turn.session) {
                     self.show_tab(Tab::Chat);
                 }
@@ -559,8 +623,7 @@ impl Panel {
 }
 
 fn append(target: &mut String, text: &str, limit: usize) {
-    let available = limit.saturating_sub(target.len()).min(text.len());
-    target.push_str(&text[..text.floor_char_boundary(available)]);
+    target.push_str(winc_agent::prefix(text, limit.saturating_sub(target.len())));
 }
 
 fn failure(error: Failure) -> String {
@@ -701,6 +764,7 @@ impl App {
             }
             panel.event(event);
         }
+        panel.limit_transcripts();
         let shown = panel.shown;
         if !shown && !panel.any_active() {
             panel.provider = None;
@@ -734,22 +798,30 @@ impl App {
         matches
     }
 
+    pub(crate) fn agent_rects(&self) -> PanelRects {
+        self.agent
+            .as_ref()
+            .filter(|panel| panel.shown)
+            .map_or(PanelRects::default(), |panel| panel.rects)
+    }
+
     pub(super) fn layout_agent(&mut self) {
-        let layout = &mut self.layout;
+        let Some(panel) = self.agent.as_mut().filter(|panel| panel.shown) else {
+            return;
+        };
+        panel.rects = PanelRects::default();
         if !self.config.agent_enabled.unwrap_or(true) {
             return;
         }
-        let Some(panel) = self.agent.as_ref().filter(|p| p.shown) else {
-            return;
-        };
+        let layout = &mut self.layout;
         let right = layout.editor.right();
         let w = panel
             .width
             .min((layout.editor.w - 160.0).max(layout.editor.w * 0.45))
             .round();
         let left = right - w;
-        layout.agent = Rect::new(left, layout.editor.y, w, layout.editor.h);
-        layout.agent_divider = Rect::new(left - 6.0, layout.editor.y, 8.0, layout.editor.h);
+        panel.rects.body = Rect::new(left, layout.editor.y, w, layout.editor.h);
+        panel.rects.divider = Rect::new(left - 6.0, layout.editor.y, 8.0, layout.editor.h);
         let end = left - 6.0;
         layout.editor.w = (end - layout.editor.x).max(0.0);
         layout.top_bar.w = (end - layout.top_bar.x).max(0.0);
@@ -766,31 +838,39 @@ impl App {
     }
 
     pub(super) fn layout_agent_button(&mut self) {
-        if !self.agent_enabled() {
+        let Some(panel) = self
+            .agent
+            .as_mut()
+            .filter(|panel| panel.shown && panel.rects.body.w > 0.0)
+        else {
             return;
-        }
+        };
         let l = &mut self.layout;
         let edge = if l.controls.w > 0.0 {
             l.controls.x - 6.0
         } else {
             l.window.right() - 14.0
         };
-        l.agent_button = Rect::new(edge - 72.0, l.sidebar_button.y, 72.0, BUTTON);
-        l.tabs.w = l.tabs.w.min((l.agent_button.x - 6.0 - l.tabs.x).max(0.0));
+        panel.rects.button = Rect::new(edge - 72.0, l.sidebar_button.y, 72.0, BUTTON);
+        l.tabs.w = l
+            .tabs
+            .w
+            .min((panel.rects.button.x - 6.0 - l.tabs.x).max(0.0));
     }
 
     pub(in crate::app) fn agent_click(&mut self, x: f32, y: f32) -> bool {
-        if self.layout.agent_button.contains(x, y) {
+        let rects = self.agent_rects();
+        if rects.button.contains(x, y) {
             self.toggle_agent();
             return true;
         }
-        if self.layout.agent_divider.contains(x, y) {
+        if rects.divider.contains(x, y) {
             self.pointer.drag = Drag::AgentDivider {
-                grab: x - self.layout.agent.x,
+                grab: x - rects.body.x,
             };
             return true;
         }
-        if !self.layout.agent.contains(x, y) {
+        if !self.agent_rects().body.contains(x, y) {
             return false;
         }
         let Some(panel) = &mut self.agent else {
@@ -872,14 +952,14 @@ impl App {
 
     pub(in crate::app) fn resize_agent(&mut self, x: f32, grab: f32) {
         if let Some(panel) = &mut self.agent {
-            panel.width = (self.layout.agent.right() - x + grab).clamp(240.0, 750.0);
+            panel.width = (panel.rects.body.right() - x + grab).clamp(240.0, 750.0);
             self.relayout();
             self.request_redraw();
         }
     }
 
     pub(in crate::app) fn scroll_agent(&mut self, x: f32, y: f32, pixels: f32) -> bool {
-        if !self.layout.agent.contains(x, y) {
+        if !self.agent_rects().body.contains(x, y) {
             return false;
         }
         if let Some(panel) = &mut self.agent {
@@ -892,5 +972,96 @@ impl App {
             self.request_redraw();
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::snapshot::{blank_app, paint};
+
+    #[test]
+    fn renders_streamed_code_and_exposes_approval_actions() {
+        let mut app = blank_app(false);
+        app.toggle_agent();
+        let panel = app.agent.as_mut().unwrap();
+        panel.opening = Some((4, false));
+        panel.event(Event::SessionOpened(
+            4,
+            Session {
+                id: "chat".into(),
+                cwd: PathBuf::new(),
+                title: "Sample".into(),
+                model: None,
+                effort: None,
+            },
+            Vec::new(),
+        ));
+        let turn = TurnKey {
+            session: "chat".into(),
+            turn: "turn".into(),
+        };
+        panel.event(Event::TurnStarted(None, turn.clone()));
+        panel.event(Event::Delta(
+            turn.clone(),
+            "m".into(),
+            DeltaKind::Message,
+            concat!(
+                "### Heading\n\n",
+                "\u{60}\u{60}\u{60}rust\nfn main() {}\n\u{60}\u{60}\u{60}"
+            )
+            .into(),
+        ));
+        paint(&mut app);
+        let panel = app.agent.as_mut().unwrap();
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, hit)| matches!(hit, Hit::CopyMessage(0)))
+        );
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, hit)| matches!(hit, Hit::CopyCode(0, _)))
+        );
+        panel.event(Event::Approval(Approval {
+            id: 55,
+            turn: turn.clone(),
+            item: "command".into(),
+            kind: winc_agent::ApprovalKind::Command,
+            details: "echo hello".into(),
+            reviewable: true,
+        }));
+        paint(&mut app);
+        let panel = app.agent.as_ref().unwrap();
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, hit)| matches!(hit, Hit::Decide(55, true)))
+        );
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, hit)| matches!(hit, Hit::Decide(55, false)))
+        );
+        let panel = app.agent.as_mut().unwrap();
+        panel.event(Event::ApprovalResolved(55));
+        panel.event(Event::Delta(
+            turn,
+            "long".into(),
+            DeltaKind::Message,
+            "- A line to scroll\n".repeat(300),
+        ));
+        paint(&mut app);
+        let panel = app.agent.as_ref().unwrap();
+        let before = panel.scroll;
+        assert!(before > 0.0);
+        let area = panel.viewport;
+        assert!(app.scroll_agent(area.x + 5.0, area.y + 5.0, -120.0));
+        assert!(app.agent.as_ref().unwrap().scroll < before);
     }
 }

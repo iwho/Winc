@@ -10,6 +10,15 @@ use std::path::PathBuf;
 /// Maximum UTF-8 size of a single prompt, including attached editor context.
 pub const MAX_PROMPT: usize = 256 * 1024;
 
+/// Takes at most the requested number of UTF-8 bytes without splitting a character.
+pub fn prefix(text: &str, bytes: usize) -> &str {
+    let mut end = bytes.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// A workspace-scoped connection to an agent. All calls return immediately.
 pub trait AgentProvider {
     /// Queues an operation, returning its local correlation ID.

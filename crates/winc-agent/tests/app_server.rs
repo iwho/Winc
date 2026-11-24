@@ -86,6 +86,23 @@ fn handles_approval_and_interrupt_over_stdio() {
             accept: false,
         })
         .unwrap();
+    let mut file_approval = None;
+    wait(&mut provider, timeout, |event| match event {
+        Event::Approval(request)
+            if request.kind == winc_agent::ApprovalKind::Files && request.reviewable =>
+        {
+            assert!(request.details.contains("result.txt"));
+            file_approval = Some(request.id);
+            true
+        }
+        _ => false,
+    });
+    provider
+        .submit(Command::Approve {
+            approval: file_approval.unwrap(),
+            accept: true,
+        })
+        .unwrap();
     provider.submit(Command::Stop(running.unwrap())).unwrap();
     wait(&mut provider, timeout, |event| {
         matches!(event, Event::TurnEnded(_, TurnStatus::Interrupted))
@@ -186,4 +203,34 @@ fn live_codex_turn() {
     });
     drop(provider);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn an_exiting_server_reports_disconnect_and_can_be_replaced() {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = std::env::temp_dir().join(format!("winc-agent-exit-{}", std::process::id()));
+    fs::create_dir(&root).unwrap();
+    let script = root.join("codex");
+    fs::write(&script, "#!/bin/sh\nread -r request\nexit 1\n").unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
+    for _ in 0..2 {
+        let mut provider =
+            CodexProvider::connect(root.clone(), Some(script.clone()), || {}).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if provider
+                .drain()
+                .into_iter()
+                .any(|event| matches!(event, Event::Disconnected(winc_agent::Failure::Exited)))
+            {
+                break;
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(15));
+        }
+    }
+    fs::remove_dir_all(root).unwrap();
 }

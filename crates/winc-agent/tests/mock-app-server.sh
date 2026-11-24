@@ -23,9 +23,14 @@ printf '%s\n' \
  '{"id":"a","method":"item/commandExecution/requestApproval","params":{"threadId":"s","turnId":"t","itemId":"command","command":"echo test"}}'
 read -r answer
 test "$answer" = '{"id":"a","result":{"decision":"decline"}}'
+printf '%s\n' \
+ '{"id":"file","method":"item/fileChange/requestApproval","params":{"threadId":"s","turnId":"t","itemId":"file","reason":"test patch"}}' \
+ '{"method":"item/fileChange/patchUpdated","params":{"threadId":"s","turnId":"t","itemId":"file","changes":[{"path":"result.txt","diff":"+ok"}]}}'
+read -r file_answer
+test "$file_answer" = '{"id":"file","result":{"decision":"accept"}}'
 read -r stop
 case "$stop" in *'"method":"turn/interrupt"'*) ;; *) exit 1;; esac
 printf '%s\n' \
- '{"id":5,"result":{}}' \
+ '{"id":6,"result":{}}' \
  '{"method":"turn/completed","params":{"threadId":"s","turn":{"id":"t","status":"interrupted","items":[]}}}'
 read -r shutdown || true

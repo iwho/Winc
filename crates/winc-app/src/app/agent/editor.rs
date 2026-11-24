@@ -255,6 +255,10 @@ impl App {
     }
 }
 
+#[allow(
+    clippy::disallowed_methods,
+    reason = "agent links are restricted to the local project"
+)]
 fn secure_path(path: PathBuf) -> Option<PathBuf> {
     if let Ok(real) = winc_config::files::canonicalize(&path) {
         return (!real.is_dir()).then_some(real);

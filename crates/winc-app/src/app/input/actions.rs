@@ -38,9 +38,11 @@ impl App {
             }
         };
         let panel = self.key_context() == Context::Panel;
-        // 焦点在终端的输入框里：编辑用的快捷键作用于输入框。
-        if matches!(self.focus, Focus::TerminalFind | Focus::TerminalRename)
-            && matches!(action, Copy | Cut | Paste | SelectAll | Undo | Redo)
+        // 编辑用的快捷键作用于当前的终端或 Codex 输入框。
+        if matches!(
+            self.focus,
+            Focus::TerminalFind | Focus::TerminalRename | Focus::Agent
+        ) && matches!(action, Copy | Cut | Paste | SelectAll | Undo | Redo)
         {
             match action {
                 Copy => self.copy_field(false),

@@ -67,6 +67,7 @@ impl App {
         let l = &self.layout;
         let mut client = vec![
             l.sidebar_button,
+            self.agent_rects().button,
             l.terminal_divider,
             l.split_divider,
             l.search,
@@ -146,6 +147,9 @@ impl App {
         if self.touch_intercepted() || self.settings.open {
             return None;
         }
+        if self.agent_rects().button.contains(x, y) {
+            return None;
+        }
         match self.target_at(x, y) {
             Target::TitleBar => Some(WindowTouch::Move),
             Target::ResizeEdge(direction) => Some(WindowTouch::Resize(direction)),
@@ -174,6 +178,9 @@ impl App {
             .is_some_and(|v| v.area.contains(x, y))
         {
             return false;
+        }
+        if self.agent_rects().divider.contains(x, y) {
+            return true;
         }
         matches!(
             self.target_at(x, y),
@@ -846,7 +853,7 @@ impl App {
         if !self.settings.open
             && self.overlays.form_dialog.is_none()
             && (matches!(self.pointer.drag, Drag::AgentDivider { .. })
-                || self.layout.agent_divider.contains(x, y))
+                || self.agent_rects().divider.contains(x, y))
         {
             self.set_cursor_icon(CursorIcon::EwResize);
             return;

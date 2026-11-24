@@ -54,12 +54,6 @@ pub struct Layout {
     /// 顶栏右端的窗口按钮（最小化、最大化、关闭），由应用绘制标题栏时才有，否则为空矩形；由
     /// `App::relayout` 放置。
     pub controls: Rect,
-    /// Agent panel toggle in the title bar.
-    pub agent_button: Rect,
-    /// The right-hand Codex panel.
-    pub agent: Rect,
-    /// Resize hit region for the Codex panel.
-    pub agent_divider: Rect,
     /// 顶栏中放置标签和新建按钮的区域。
     pub tabs: Rect,
     /// 标签栏右端切换「源代码 / 分栏 / 预览」的三个按钮（仅 SVG 等可预览的文件有，见
@@ -216,9 +210,6 @@ impl Layout {
             sidebar_button,
             top_bar,
             controls: Rect::default(),
-            agent: Rect::default(),
-            agent_button: Rect::default(),
-            agent_divider: Rect::default(),
             tabs,
             preview: Rect::default(),
             browser: Rect::default(),

@@ -13,12 +13,11 @@ const MAX_REVIEW: usize = 24 * 1024;
 const MAX_FILES: usize = 256;
 
 pub(super) fn append(text: &mut String, value: &str, limit: usize) {
-    let available = limit.saturating_sub(text.len());
-    text.push_str(&value[..value.floor_char_boundary(available.min(value.len()))]);
+    text.push_str(crate::prefix(value, limit.saturating_sub(text.len())));
 }
 
 fn bounded(value: &str, limit: usize) -> String {
-    value[..value.floor_char_boundary(limit.min(value.len()))].to_owned()
+    crate::prefix(value, limit).to_owned()
 }
 
 fn string(value: &Value) -> Option<String> {
@@ -178,6 +177,7 @@ struct PendingApproval {
     kind: ApprovalKind,
     permissions: Value,
     reviewable: bool,
+    file: Option<(String, String, String)>,
 }
 
 #[derive(Default)]
@@ -384,7 +384,13 @@ impl Protocol {
                     return;
                 };
                 if method == "item/started" && item.kind == ItemKind::FileChange {
-                    self.remember_file_review(&key, &item.id, &item.output);
+                    self.remember_file_review(
+                        &key,
+                        &item.id,
+                        &params["item"]["changes"],
+                        &item.output,
+                        events,
+                    );
                 }
                 Event::Item(key, item, method == "item/completed")
             }
@@ -393,7 +399,7 @@ impl Protocol {
                     return;
                 };
                 let (files, patch) = changes(&params["changes"]);
-                self.remember_file_review(&key, &id, &patch);
+                self.remember_file_review(&key, &id, &params["changes"], &patch, events);
                 Event::Files(key, id, files, patch)
             }
             "item/agentMessage/delta"
@@ -436,10 +442,42 @@ impl Protocol {
         events.push(event);
     }
 
-    fn remember_file_review(&mut self, turn: &TurnKey, item: &str, patch: &str) {
-        if self.file_reviews.len() < 256 {
-            self.file_reviews
-                .insert((turn.clone(), item.to_owned()), patch.to_owned());
+    fn remember_file_review(
+        &mut self,
+        turn: &TurnKey,
+        item: &str,
+        changes: &Value,
+        patch: &str,
+        events: &mut Vec<Event>,
+    ) {
+        let file_updates = array(changes);
+        let complete = !file_updates.is_empty()
+            && file_updates.len() <= MAX_FILES
+            && file_bytes(file_updates).is_some_and(|bytes| bytes <= MAX_OUTPUT)
+            && !patch.trim().is_empty();
+        let key = (turn.clone(), item.to_owned());
+        if !complete {
+            self.file_reviews.remove(&key);
+        } else if self.file_reviews.len() < 256 || self.file_reviews.contains_key(&key) {
+            self.file_reviews.insert(key, patch.to_owned());
+        }
+        for (&id, pending) in &mut self.approvals {
+            let Some((target, root, reason)) = &pending.file else {
+                continue;
+            };
+            if pending.turn != *turn || *target != item {
+                continue;
+            }
+            let (details, reviewable) = file_approval(root, reason, complete.then_some(patch));
+            pending.reviewable = reviewable;
+            events.push(Event::Approval(Approval {
+                id,
+                turn: turn.clone(),
+                item: item.to_owned(),
+                kind: ApprovalKind::Files,
+                details,
+                reviewable,
+            }));
         }
     }
 
@@ -492,15 +530,7 @@ impl Protocol {
                 let patch = self.file_reviews.get(&(turn.clone(), item.clone()));
                 let grant_root = params["grantRoot"].as_str().unwrap_or_default();
                 let reason = params["reason"].as_str().unwrap_or_default();
-                let details = format!(
-                    "{grant_root}\n{reason}\n{}",
-                    patch.map_or("", String::as_str)
-                );
-                (
-                    details,
-                    patch.is_some_and(|patch| !patch.trim().is_empty() && patch.len() < MAX_OUTPUT)
-                        || !grant_root.is_empty(),
-                )
+                file_approval(grant_root, reason, patch.map(String::as_str))
             }
             ApprovalKind::Permissions => (
                 serde_json::to_string_pretty(permission).unwrap_or_default(),
@@ -516,6 +546,14 @@ impl Protocol {
                 kind,
                 permissions: permission.clone(),
                 reviewable,
+                file: if kind == ApprovalKind::Files {
+                    let root = params["grantRoot"].as_str().unwrap_or_default();
+                    let reason = params["reason"].as_str().unwrap_or_default();
+                    (root.len().saturating_add(reason.len()).saturating_add(2) <= MAX_REVIEW)
+                        .then(|| (item.clone(), root.to_owned(), reason.to_owned()))
+                } else {
+                    None
+                },
             },
         );
         events.push(Event::Approval(Approval {
@@ -534,8 +572,28 @@ impl Protocol {
     }
 }
 
+fn file_bytes(changes: &[Value]) -> Option<usize> {
+    changes.iter().try_fold(0usize, |total, change| {
+        let path = change["path"].as_str()?;
+        let diff = change["diff"].as_str()?;
+        Some(
+            total
+                .saturating_add(path.len())
+                .saturating_add(diff.len())
+                .saturating_add(2),
+        )
+    })
+}
+
+fn file_approval(root: &str, reason: &str, patch: Option<&str>) -> (String, bool) {
+    let details = format!("{root}\n{reason}\n{}", patch.unwrap_or_default());
+    let complete = patch.is_some() || !root.is_empty();
+    let reviewable = complete && details.len() <= MAX_REVIEW;
+    (bounded(&details, MAX_REVIEW), reviewable)
+}
+
 fn same_root(a: &Path, b: &Path) -> bool {
-    a == b || (cfg!(windows) && a.canonicalize().is_ok_and(|real| real == b))
+    a == b || (cfg!(windows) && winc_config::files::canonicalize(a).is_ok_and(|real| real == b))
 }
 
 pub(super) fn request(id: u64, method: &str, params: Value) -> Value {

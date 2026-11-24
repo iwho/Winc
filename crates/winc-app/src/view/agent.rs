@@ -13,15 +13,11 @@ const ROW: f32 = 20.0;
 const PAD: f32 = 10.0;
 
 pub(super) fn draw(app: &mut App, frame: &mut Frame<'_>) {
-    let toggle = app.layout.agent_button;
+    let toggle = app.agent_rects().button;
     if toggle.w <= 0.0 {
         return;
     }
-    let shown = app.agent.as_ref().is_some_and(|panel| panel.shown);
-    paint_button(app, frame, toggle, t!("agent-title"), shown, true);
-    if !shown {
-        return;
-    }
+    paint_button(app, frame, toggle, t!("agent-title"), true, true);
     // The field and chat caches are mutated while drawing. The existing
     // input renderer also reads the window's theme, metrics and IME state.
     if let Some(mut panel) = app.agent.take() {
@@ -31,14 +27,14 @@ pub(super) fn draw(app: &mut App, frame: &mut Frame<'_>) {
 }
 
 fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
-    let area = app.layout.agent;
+    let area = panel.rects.body;
     panel.hits.clear();
     if area.w <= 0.0 || area.h < 110.0 {
         return;
     }
     let p = app.palette;
     frame.rect_clipped(area, p.sidebar_bg, RADIUS_ISLAND, area);
-    let divider = app.layout.agent_divider;
+    let divider = panel.rects.divider;
     let (x, y) = app.mouse();
     if divider.contains(x, y) {
         frame.rect(
@@ -457,6 +453,23 @@ fn draw_approval(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect
     );
     panel.viewport = viewport;
     panel.max_scroll = (lines.len() as f32 * ROW - viewport.h).max(0.0);
+    if panel.max_scroll > 0.0 {
+        let hint = Rect::new(
+            copy.right() + 6.0,
+            copy.y,
+            (area.right() - copy.right() - 6.0).max(0.0),
+            copy.h,
+        );
+        ui_text(
+            frame,
+            app,
+            hint.x,
+            hint,
+            t!("agent-approval-details"),
+            app.palette.text_muted,
+            hint,
+        );
+    }
     panel.scroll = panel.scroll.min(panel.max_scroll);
     paint_lines(
         frame,

@@ -111,7 +111,7 @@ impl App {
             && self.overlays.alert.is_none()
             && self.overlays.form_dialog.is_none()
             && !self.overlays.picker.open
-            && self.layout.agent.contains(x, y)
+            && self.agent_rects().body.contains(x, y)
         {
             let pixels = match delta {
                 MouseScrollDelta::LineDelta(_, lines) => -lines * 60.0,

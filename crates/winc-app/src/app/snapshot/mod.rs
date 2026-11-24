@@ -106,7 +106,7 @@ fn app_with(path: &Path, dark: bool) -> App {
 }
 
 /// 创建刚启动时的离屏界面：没有打开的目录，没有标签，没有历史记录。
-fn blank_app(dark: bool) -> App {
+pub(super) fn blank_app(dark: bool) -> App {
     let palette = Palette::for_dark(dark);
     let mut app = App::new(
         Editor::default(),
