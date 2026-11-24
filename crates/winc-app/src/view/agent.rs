@@ -4,7 +4,7 @@ use winc_agent::{ApprovalKind, ItemKind};
 use winc_preview::markdown::{Block, Inline};
 
 use crate::app::Focus;
-use crate::app::agent::{Connection, Hit, Link, Panel};
+use crate::app::agent::{Connection, Hit, Link, Panel, Tab};
 use crate::layout::wrap_text;
 
 use super::*;
@@ -49,7 +49,13 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     let body = area.inset(PAD, 8.0);
     let header = Rect::new(body.x, body.y, body.w, 26.0);
     let new = Rect::new(header.right() - 84.0, header.y, 84.0, header.h);
+    let project_matches = panel.root.as_ref() == app.editor.workspace.as_ref().map(|ws| &ws.root);
     let (label, action, enabled) = match panel.connection {
+        _ if !project_matches && panel.root.is_some() => (
+            t!("agent-switch-project"),
+            Hit::SwitchProject,
+            !panel.any_active(),
+        ),
         Connection::Ready => (t!("agent-new"), Hit::New, true),
         Connection::Connecting => (t!("agent-new"), Hit::New, false),
         _ => (t!("agent-reconnect"), Hit::Retry, true),
@@ -73,13 +79,52 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         .map_or_else(|| t!("agent-title").into(), |name| name.to_string_lossy());
     ui_text(frame, app, title.x, title, &root_name, p.text, title);
 
-    let status_top = header.bottom() + 4.0;
+    let nav = Rect::new(body.x, header.bottom() + 4.0, body.w, 25.0);
+    let names = [
+        (
+            t!("agent-history"),
+            Tab::History,
+            panel.connection == Connection::Ready,
+        ),
+        (
+            panel
+                .model()
+                .map_or(t!("agent-model"), |model| model.name.as_str()),
+            Tab::Models,
+            !panel.models().is_empty(),
+        ),
+        (
+            panel.effort().unwrap_or(t!("agent-effort")),
+            Tab::Efforts,
+            panel.model().is_some(),
+        ),
+    ];
+    let mut nav_hits = Vec::new();
+    {
+        let mut actions = Actions {
+            app,
+            frame,
+            hits: &mut nav_hits,
+        };
+        let w = ((nav.w - 8.0) / 3.0).max(0.0);
+        for (i, (label, tab, enabled)) in names.iter().enumerate() {
+            let area = Rect::new(nav.x + i as f32 * (w + 4.0), nav.y, w, nav.h);
+            actions.button(area, label, Hit::Show(*tab), panel.tab == *tab, *enabled);
+        }
+    }
+    panel.hits.extend(nav_hits);
+    let status_top = nav.bottom() + 4.0;
     let status_color = if panel.error.is_some() {
         p.warning
     } else {
         p.text_muted
     };
-    let rows = wrap_text(panel.status(), body.w, |text| {
+    let status = if !project_matches && panel.root.is_some() {
+        t!("agent-project-changed")
+    } else {
+        panel.status()
+    };
+    let rows = wrap_text(status, body.w, |text| {
         frame.measure(FontKind::Ui, app.fonts.ui, text)
     });
     for (i, text) in rows.iter().take(3).enumerate() {
@@ -87,6 +132,22 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         ui_text(frame, app, line.x, line, text, status_color, body);
     }
     let mut top = status_top + ROW * rows.len().min(3) as f32 + 4.0;
+    if panel.workspace_parallel {
+        let warning = t!("agent-parallel");
+        let lines = wrap_text(warning, body.w, |text| {
+            frame.measure(FontKind::Ui, app.fonts.ui, text)
+        });
+        for text in lines {
+            let row = Rect::new(body.x, top, body.w, ROW);
+            ui_text(frame, app, row.x, row, text, p.warning, body);
+            top += ROW;
+        }
+    }
+    if let Some(tokens) = panel.token_label() {
+        let row = Rect::new(body.x, top, body.w, ROW);
+        ui_text(frame, app, row.x, row, &tokens, p.text_dim, body);
+        top += ROW;
+    }
 
     let focused = app.focus == Focus::Agent;
     let input_h = 62.0_f32.min((body.h * 0.22).max(20.0));
@@ -98,12 +159,12 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     let attach_file = Rect::new(body.x, action_y, 64.0, 22.0);
     let attach_selection = Rect::new(attach_file.right() + 4.0, action_y, 75.0, 22.0);
     let changes = Rect::new(body.right() - 67.0, action_y, 67.0, 22.0);
-    let (can_send, can_stop) = (panel.can_send(), panel.can_stop());
+    let (can_send, can_stop) = (project_matches && panel.can_send(), panel.can_stop());
     let attachment_path = panel
         .attachment
         .as_ref()
         .map(|attached| attached.path().to_owned());
-    let change_label = if panel.show_changes {
+    let change_label = if panel.tab == Tab::Changes {
         t!("agent-chat")
     } else {
         t!("agent-changes")
@@ -134,8 +195,8 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             actions.button(
                 changes,
                 change_label,
-                Hit::Changes,
-                panel.show_changes,
+                Hit::Show(Tab::Changes),
+                panel.tab == Tab::Changes,
                 true,
             );
         }
@@ -181,12 +242,97 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     if area.h <= 0.0 {
         return;
     }
-    if panel.approval().is_some() {
-        draw_approval(app, frame, panel, area);
-    } else if panel.show_changes {
-        draw_changes(app, frame, panel, area);
-    } else {
-        draw_chat(app, frame, panel, area);
+    match panel.tab {
+        Tab::Chat if panel.approval().is_some() => draw_approval(app, frame, panel, area),
+        Tab::Chat => draw_chat(app, frame, panel, area),
+        Tab::Changes => draw_changes(app, frame, panel, area),
+        Tab::History | Tab::Models | Tab::Efforts => draw_catalog(app, frame, panel, area),
+    }
+}
+
+fn draw_catalog(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
+    let mut rows: Vec<(String, Hit, bool)> = match panel.tab {
+        Tab::History => panel
+            .history()
+            .iter()
+            .map(|session| {
+                let title = if session.title.is_empty() {
+                    t!("agent-untitled").into()
+                } else {
+                    session.title.replace(['\n', '\r'], " ")
+                };
+                let title = if panel.pending(&session.id) {
+                    t!("agent-session-active", name = title.as_str())
+                } else {
+                    title
+                };
+                (
+                    title,
+                    Hit::ChooseSession(session.id.clone()),
+                    panel.selected_id() == Some(&session.id),
+                )
+            })
+            .collect(),
+        Tab::Models => panel
+            .models()
+            .iter()
+            .map(|model| {
+                let label = if model.is_default {
+                    t!("agent-model-default", name = model.name.as_str())
+                } else {
+                    model.name.clone()
+                };
+                (
+                    label,
+                    Hit::ChooseModel(model.id.clone()),
+                    panel.model().is_some_and(|m| m.id == model.id),
+                )
+            })
+            .collect(),
+        Tab::Efforts => panel
+            .model()
+            .into_iter()
+            .flat_map(|model| &model.efforts)
+            .map(|effort| {
+                (
+                    effort.clone(),
+                    Hit::ChooseEffort(effort.clone()),
+                    panel.effort() == Some(effort),
+                )
+            })
+            .collect(),
+        _ => return,
+    };
+    panel.viewport = area;
+    if panel.more() {
+        rows.push((t!("agent-more").into(), Hit::More, false));
+    }
+    if rows.is_empty() {
+        let label = match panel.tab {
+            Tab::History => t!("agent-history-empty"),
+            _ => t!("agent-models-empty"),
+        };
+        let row = Rect::new(area.x, area.y, area.w, ROW);
+        ui_text(frame, app, row.x, row, label, app.palette.text_muted, area);
+        panel.max_scroll = 0.0;
+        return;
+    }
+    let stride = 30.0;
+    panel.max_scroll = (rows.len() as f32 * stride - area.h).max(0.0);
+    panel.scroll = panel.scroll.min(panel.max_scroll);
+    let first = (panel.scroll / stride) as usize;
+    let mut actions = Actions {
+        app,
+        frame,
+        hits: &mut panel.hits,
+    };
+    for (index, (label, hit, selected)) in rows.into_iter().enumerate().skip(first) {
+        let y = area.y + index as f32 * stride - panel.scroll;
+        if y >= area.bottom() {
+            break;
+        }
+        let row = Rect::new(area.x, y, area.w, stride - 3.0).intersect(area);
+        actions.button(row, &label, hit, selected, true);
     }
 }
 

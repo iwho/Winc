@@ -163,6 +163,9 @@ pub(super) enum Reply {
     Initialize,
     Account,
     Session,
+    VerifySession(String),
+    Resume,
+    Recent(Session),
     History,
     Models,
     Send(String),
@@ -180,7 +183,6 @@ struct PendingApproval {
 #[derive(Default)]
 pub(super) struct Protocol {
     approvals: HashMap<u64, PendingApproval>,
-    known: HashSet<String>,
     loaded: HashSet<String>,
     // Some servers send the file item before its approval request, others publish a patch update.
     file_reviews: HashMap<(TurnKey, String), String>,
@@ -199,10 +201,10 @@ impl Protocol {
                 json!({"cwd": root, "approvalPolicy": "on-request", "approvalsReviewer": "user", "sandbox": "workspace-write"}),
                 Reply::Session,
             ),
-            Command::Resume(session) if self.known.contains(&session) => (
-                "thread/resume",
-                json!({"threadId": session, "cwd": root, "approvalPolicy": "on-request", "approvalsReviewer": "user", "sandbox": "workspace-write"}),
-                Reply::Session,
+            Command::Resume(session) => (
+                "thread/read",
+                json!({"threadId": session, "includeTurns": false}),
+                Reply::VerifySession(session),
             ),
             Command::History(cursor) => (
                 "thread/list",
@@ -275,31 +277,24 @@ impl Protocol {
                 login_required: result["requiresOpenaiAuth"] == true && result["account"].is_null(),
             },
             Reply::Session => {
-                let mut session = session(&result["thread"])?;
-                if session.cwd != root {
-                    return Some(Event::RequestFailed(id, Failure::Workspace));
-                }
-                session.model = string(&result["model"]).or(session.model);
-                session.effort = string(&result["reasoningEffort"]).or(session.effort);
-                self.known.insert(session.id.clone());
-                self.loaded.insert(session.id.clone());
-                let turns = array(&result["thread"]["turns"])
+                let session = self.opened(result, root)?;
+                Event::SessionOpened(id, session, Vec::new())
+            }
+            Reply::Recent(session) => {
+                let turns = array(&result["data"])
                     .iter()
-                    .rev()
-                    .take(150)
                     .rev()
                     .filter_map(|value| turn(&session.id, value))
                     .collect();
                 Event::SessionOpened(id, session, turns)
             }
+            Reply::VerifySession(_) | Reply::Resume => return None,
             Reply::History => {
                 let sessions: Vec<_> = array(&result["data"])
                     .iter()
                     .filter_map(session)
-                    .filter(|session| session.cwd == root)
+                    .filter(|session| same_root(&session.cwd, root))
                     .collect();
-                self.known
-                    .extend(sessions.iter().map(|session| session.id.clone()));
                 Event::History(id, sessions, string(&result["nextCursor"]))
             }
             Reply::Models => Event::Models(
@@ -313,6 +308,38 @@ impl Protocol {
             }
             Reply::Stop => Event::Acknowledged(id),
         })
+    }
+
+    pub(super) fn opened(&mut self, result: &Value, root: &Path) -> Option<Session> {
+        let mut session = session(&result["thread"])?;
+        if !same_root(&session.cwd, root) {
+            return None;
+        }
+        session.model = string(&result["model"]).or(session.model);
+        session.effort = string(&result["reasoningEffort"]).or(session.effort);
+        self.loaded.insert(session.id.clone());
+        Some(session)
+    }
+
+    pub(super) fn verify_resume(
+        &self,
+        id: u64,
+        thread: String,
+        result: &Value,
+        root: &Path,
+    ) -> Result<Value, Failure> {
+        let current = session(&result["thread"]).ok_or(Failure::Protocol)?;
+        if current.id != thread || !same_root(&current.cwd, root) {
+            return Err(Failure::Workspace);
+        }
+        Ok(request(
+            id,
+            "thread/resume",
+            json!({
+                "threadId": thread, "cwd": root, "excludeTurns": true,
+                "approvalPolicy": "on-request", "approvalsReviewer": "user", "sandbox": "workspace-write",
+            }),
+        ))
     }
 
     pub(super) fn notification(&mut self, method: &str, params: &Value, events: &mut Vec<Event>) {
@@ -456,7 +483,10 @@ impl Protocol {
                 });
                 let reviewable =
                     params["command"].is_string() || params["networkApprovalContext"].is_object();
-                (display.to_string(), reviewable)
+                (
+                    serde_json::to_string_pretty(&display).unwrap_or_default(),
+                    reviewable,
+                )
             }
             ApprovalKind::Files => {
                 let patch = self.file_reviews.get(&(turn.clone(), item.clone()));
@@ -472,7 +502,10 @@ impl Protocol {
                         || !grant_root.is_empty(),
                 )
             }
-            ApprovalKind::Permissions => (permission.to_string(), permission.is_object()),
+            ApprovalKind::Permissions => (
+                serde_json::to_string_pretty(permission).unwrap_or_default(),
+                permission.is_object(),
+            ),
         };
         let reviewable = reviewable && details.len() <= MAX_REVIEW;
         self.approvals.insert(
@@ -499,6 +532,10 @@ impl Protocol {
     pub(super) fn remove_approval(&mut self, id: u64) {
         self.approvals.remove(&id);
     }
+}
+
+fn same_root(a: &Path, b: &Path) -> bool {
+    a == b || (cfg!(windows) && a.canonicalize().is_ok_and(|real| real == b))
 }
 
 pub(super) fn request(id: u64, method: &str, params: Value) -> Value {

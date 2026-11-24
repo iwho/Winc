@@ -429,6 +429,7 @@ impl Winc {
     fn settle(&mut self) -> (Vec<Request>, bool) {
         self.sync_config();
         self.drop_closed();
+        self.refresh_agent_writers();
         for slot in &mut self.windows {
             slot.app.finish_waiting();
         }
@@ -446,6 +447,23 @@ impl Winc {
             _ => true,
         });
         (requests, exit)
+    }
+
+    /// Updates the write-conflict warning in windows that have connected Codex.
+    fn refresh_agent_writers(&mut self) {
+        for index in 0..self.windows.len() {
+            let Some((root, _)) = self.windows[index].app.agent_writers() else {
+                continue;
+            };
+            let writers: usize = self
+                .windows
+                .iter()
+                .filter_map(|slot| slot.app.agent_writers())
+                .filter(|(other, _)| *other == root)
+                .map(|(_, count)| count)
+                .sum();
+            self.windows[index].app.set_agent_parallel(writers > 1);
+        }
     }
 
     /// 某个窗口改了设置（[`App::config_rev`] 变了）：把它的配置发给其他窗口。

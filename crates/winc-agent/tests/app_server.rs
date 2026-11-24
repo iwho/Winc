@@ -109,6 +109,20 @@ fn live_codex_turn() {
         }
         _ => false,
     });
+    let mut model = None;
+    provider.submit(Command::Models(None)).unwrap();
+    wait(&mut provider, timeout, |event| match event {
+        Event::Models(_, models, _) => {
+            let entry = models
+                .iter()
+                .find(|m| m.is_default)
+                .or(models.first())
+                .expect("model list empty");
+            model = Some(entry.id.clone());
+            true
+        }
+        _ => false,
+    });
     let mut session = None;
     let id = provider.submit(Command::NewSession).unwrap();
     wait(&mut provider, timeout, |event| match event {
@@ -118,11 +132,12 @@ fn live_codex_turn() {
         }
         _ => false,
     });
+    let session = session.unwrap();
     provider
         .submit(Command::Send {
-            session: session.unwrap(),
-            text: "Reply with WINC_OK. Do not use tools or modify files.".into(),
-            model: None,
+            session: session.clone(),
+            text: "Create result.txt in the current directory containing WINC_OK on its own line, and then reply WINC_OK. Only modify that file.".into(),
+            model,
             effort: None,
         })
         .unwrap();
@@ -137,6 +152,33 @@ fn live_codex_turn() {
             assert!(
                 streamed.contains("WINC_OK"),
                 "expected the streamed smoke-test response"
+            );
+            true
+        }
+        _ => false,
+    });
+    assert_eq!(
+        std::fs::read_to_string(root.join("result.txt"))
+            .unwrap()
+            .trim(),
+        "WINC_OK"
+    );
+    provider.submit(Command::History(None)).unwrap();
+    wait(&mut provider, timeout, |event| match event {
+        Event::History(_, sessions, _) => {
+            assert!(sessions.iter().any(|entry| entry.id == session));
+            true
+        }
+        _ => false,
+    });
+    let resume = provider.submit(Command::Resume(session.clone())).unwrap();
+    wait(&mut provider, timeout, |event| match event {
+        Event::SessionOpened(id, restored, history) if id == resume => {
+            assert_eq!(restored.id, session);
+            assert!(
+                history
+                    .iter()
+                    .any(|turn| turn.status == TurnStatus::Completed)
             );
             true
         }

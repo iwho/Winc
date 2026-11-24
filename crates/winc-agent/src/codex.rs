@@ -12,6 +12,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+mod shutdown;
+use shutdown::Shutdown;
+
 use crate::protocol::{Protocol, Reply, request};
 use crate::*;
 
@@ -27,6 +30,7 @@ pub struct CodexProvider {
     commands: SyncSender<Job>,
     events: Receiver<Vec<Event>>,
     wake_pending: Arc<AtomicBool>,
+    shutdown: Arc<Shutdown>,
     next_id: u64,
 }
 
@@ -45,6 +49,8 @@ impl CodexProvider {
         let (out, events) = mpsc::sync_channel(4);
         let wake_pending = Arc::new(AtomicBool::new(false));
         let wake_flag = Arc::clone(&wake_pending);
+        let shutdown = Arc::new(Shutdown::default());
+        let process_shutdown = Arc::clone(&shutdown);
         thread::Builder::new()
             .name("winc-codex".into())
             .spawn(move || {
@@ -66,7 +72,9 @@ impl CodexProvider {
                     }
                     Ok(())
                 };
-                if let Err(failure) = supervise(&root, executable, jobs, &publish) {
+                if let Err(failure) =
+                    supervise(&root, executable, jobs, &process_shutdown, &publish)
+                {
                     let _ = publish(vec![Event::Disconnected(failure)]);
                 }
             })?;
@@ -74,8 +82,15 @@ impl CodexProvider {
             commands,
             events,
             wake_pending,
+            shutdown,
             next_id: 2,
         })
+    }
+}
+
+impl Drop for CodexProvider {
+    fn drop(&mut self) {
+        self.shutdown.stop();
     }
 }
 
@@ -101,19 +116,11 @@ impl AgentProvider for CodexProvider {
     }
 }
 
-struct ProcessGuard(Child);
+struct ProcessGuard<'a>(Child, &'a Shutdown);
 
-impl Drop for ProcessGuard {
+impl Drop for ProcessGuard<'_> {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            // SAFETY: spawn places the child in its own process group. Before
-            // wait/reap its process ID cannot be assigned to another child.
-            #[allow(unsafe_code)]
-            unsafe {
-                libc::kill(-(self.0.id() as libc::pid_t), libc::SIGKILL);
-            }
-        }
+        self.1.release();
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
@@ -123,6 +130,7 @@ fn supervise(
     root: &Path,
     executable: Option<PathBuf>,
     jobs: Receiver<Job>,
+    shutdown: &Shutdown,
     publish: &impl Fn(Vec<Event>) -> Result<(), ()>,
 ) -> Result<(), Failure> {
     let root = root.canonicalize().map_err(|_| Failure::Workspace)?;
@@ -146,10 +154,12 @@ fn supervise(
         use std::os::windows::process::CommandExt;
         process.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
-    let mut child = ProcessGuard(process.spawn().map_err(|error| match error.kind() {
+    let spawned = process.spawn().map_err(|error| match error.kind() {
         io::ErrorKind::NotFound => Failure::ExecutableNotFound,
         _ => Failure::Start,
-    })?);
+    })?;
+    let mut child = ProcessGuard(spawned, shutdown);
+    shutdown.register(&child.0).map_err(|_| Failure::Start)?;
 
     let stdin = child.0.stdin.take().ok_or(Failure::Start)?;
     let stdout = child.0.stdout.take().ok_or(Failure::Start)?;
@@ -257,18 +267,20 @@ fn supervise(
     drop(wire_in);
     // Cleanup is outside the event loop. Detached descendants can retain pipes
     // on platforms without process groups, so never wait on those indefinitely.
-    #[cfg(unix)]
     for worker in workers {
-        if result.is_ok() || worker.is_finished() {
+        if cfg!(any(unix, windows)) || worker.is_finished() {
             let _ = worker.join();
         }
     }
-    Ok(result?)
+    result
 }
 
 fn codex_path(configured: Option<PathBuf>) -> Result<PathBuf, Failure> {
     let name = if cfg!(windows) { "codex.exe" } else { "codex" };
     if let Some(configured) = configured {
+        if !configured.is_absolute() {
+            return Err(Failure::ExecutableNotFound);
+        }
         return configured
             .canonicalize()
             .map_err(|_| Failure::ExecutableNotFound);
@@ -405,6 +417,21 @@ impl<'a> Client<'a> {
                 )?;
             }
             Reply::Initialize => return Err(Failure::Protocol),
+            Reply::VerifySession(thread) => {
+                match self.protocol.verify_resume(id, thread, &result, &self.root) {
+                    Ok(resume) => self.send_request(id, resume, Reply::Resume)?,
+                    Err(error) => events.push(Event::RequestFailed(id, error)),
+                }
+            }
+            Reply::Resume => {
+                if let Some(session) = self.protocol.opened(&result, &self.root) {
+                    self.send_request(id, request(id, "thread/turns/list", json!({
+                        "threadId": session.id, "limit": 16, "sortDirection": "desc", "itemsView": "full",
+                    })), Reply::Recent(session))?;
+                } else {
+                    events.push(Event::RequestFailed(id, Failure::Workspace));
+                }
+            }
             Reply::Account if !result["requiresOpenaiAuth"].is_boolean() => {
                 return Err(Failure::Protocol);
             }

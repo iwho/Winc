@@ -181,7 +181,7 @@ impl App {
         if self.agent_project_matches()
             && let Some(panel) = &mut self.agent
         {
-            panel.attachment = Some(attached);
+            panel.attachment = Some(std::rc::Rc::new(attached));
             self.focus = Focus::Agent;
             self.request_redraw();
         }

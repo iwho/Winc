@@ -897,6 +897,7 @@ impl App {
 
     /// 在事件循环结束前收尾：等待后台保存完成，停止格式化，补写同意退出后的修改，记录会话状态。
     pub(crate) fn prepare_exit(&mut self) {
+        self.close_agent();
         // 等待后台保存的大文件写完，避免留下写入不完整的临时文件。
         self.wait_for_saves();
         self.cancel_all_formatting();

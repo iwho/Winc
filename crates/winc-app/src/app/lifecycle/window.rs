@@ -82,6 +82,7 @@ impl App {
     /// 全屏的窗口不直接隐藏，否则留下黑色的全屏空间：还有别的窗口时它随后被关掉，由系统退出
     /// 全屏；否则先退出全屏，完成后再隐藏（[`App::finish_hiding`]）。
     pub(super) fn hide_window(&mut self) {
+        self.close_agent();
         self.window.hidden = true;
         #[cfg(target_os = "macos")]
         if let Some(window) = (self.window.handle.as_ref()).filter(|w| w.fullscreen().is_some())

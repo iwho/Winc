@@ -3,7 +3,10 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
 mod editor;
+mod sessions;
 pub(crate) use editor::Link;
+use sessions::Catalog;
+pub(crate) use sessions::Tab;
 
 use winc_agent::{
     AgentProvider, Approval, CodexProvider, Command, DeltaKind, Event, Failure, Item, ItemKind,
@@ -39,14 +42,26 @@ impl Card {
     }
 }
 
+struct Submission {
+    id: u64,
+    text: String,
+    attachment: Option<std::rc::Rc<editor::Attachment>>,
+}
+
 struct Conversation {
     session: Session,
     cards: VecDeque<Card>,
     running: Option<TurnKey>,
-    send_request: Option<(u64, String)>,
+    send_request: Option<Submission>,
     stop_request: Option<u64>,
     status: Option<TurnStatus>,
-    tokens: u64,
+    tokens: (u64, u64),
+    draft: TextField,
+    attachment: Option<std::rc::Rc<editor::Attachment>>,
+    model: Option<String>,
+    effort: Option<String>,
+    loaded: bool,
+    finished: Option<TurnKey>,
     changes: BTreeMap<PathBuf, bool>,
     change_turn: Option<TurnKey>,
 }
@@ -60,7 +75,13 @@ impl Conversation {
             send_request: None,
             stop_request: None,
             status: None,
-            tokens: 0,
+            tokens: (0, 0),
+            draft: TextField::multiline(),
+            attachment: None,
+            model: None,
+            effort: None,
+            loaded: true,
+            finished: None,
             changes: BTreeMap::new(),
             change_turn: None,
         }
@@ -106,7 +127,12 @@ pub(crate) enum Hit {
     Decide(u64, bool),
     Attach(bool),
     Detach,
-    Changes,
+    Show(Tab),
+    ChooseSession(String),
+    ChooseModel(String),
+    ChooseEffort(String),
+    More,
+    SwitchProject,
     Open(Link, bool),
 }
 
@@ -130,8 +156,12 @@ pub(crate) struct Panel {
     pub(crate) scroll: f32,
     pub(crate) max_scroll: f32,
     pub(crate) follow: bool,
-    pub(crate) attachment: Option<editor::Attachment>,
-    pub(crate) show_changes: bool,
+    pub(crate) workspace_parallel: bool,
+    pub(crate) attachment: Option<std::rc::Rc<editor::Attachment>>,
+    pub(crate) tab: Tab,
+    catalog: Catalog,
+    default_model: Option<String>,
+    default_effort: Option<String>,
     provider: Option<CodexProvider>,
     conversations: HashMap<String, Conversation>,
     selected: Option<String>,
@@ -153,8 +183,12 @@ impl Panel {
             scroll: 0.0,
             max_scroll: 0.0,
             follow: true,
+            workspace_parallel: false,
             attachment: None,
-            show_changes: false,
+            tab: Tab::Chat,
+            catalog: Catalog::default(),
+            default_model: None,
+            default_effort: None,
             provider: None,
             conversations: HashMap::new(),
             selected: None,
@@ -184,7 +218,7 @@ impl Panel {
             .is_some_and(|s| s.running.is_some() || s.send_request.is_some())
     }
 
-    fn any_active(&self) -> bool {
+    pub(crate) fn any_active(&self) -> bool {
         self.conversations
             .values()
             .any(|s| s.running.is_some() || s.send_request.is_some())
@@ -194,8 +228,10 @@ impl Panel {
 
     pub(crate) fn can_send(&self) -> bool {
         self.connection == Connection::Ready
+            && self.catalog_ready()
             && self.opening.is_none()
             && !self.busy()
+            && self.current().is_none_or(|session| session.loaded)
             && (!self.field.text().trim().is_empty() || self.attachment.is_some())
     }
 
@@ -276,15 +312,23 @@ impl Panel {
         if let Some(attachment) = &self.attachment {
             attachment.append_to(&mut prompt);
         }
+        if !session.loaded {
+            return;
+        }
+        let attachment = self.attachment.clone();
         let command = Command::Send {
             session: session.session.id.clone(),
             text: prompt,
-            model: None,
-            effort: None,
+            model: self.model().map(|model| model.id.clone()),
+            effort: self.effort().map(str::to_owned),
         };
         if let Some(id) = self.submit(command) {
-            self.current_mut().expect("selected session").send_request = Some((id, text));
-            self.follow = true;
+            self.current_mut().expect("selected session").send_request = Some(Submission {
+                id,
+                text,
+                attachment,
+            });
+            self.show_tab(Tab::Chat);
         }
     }
 
@@ -307,6 +351,12 @@ impl Panel {
                 } else {
                     Connection::Ready
                 };
+                if !login_required {
+                    self.discover();
+                    if let Some(selected) = self.selected.clone() {
+                        self.choose(selected);
+                    }
+                }
             }
             Event::Disconnected(error) => {
                 self.provider = None;
@@ -315,6 +365,7 @@ impl Panel {
                 self.opening = None;
                 self.approvals.clear();
                 for session in self.conversations.values_mut() {
+                    session.loaded = false;
                     if session.running.take().is_some() || session.send_request.take().is_some() {
                         session.status = Some(TurnStatus::Failed);
                     }
@@ -324,6 +375,7 @@ impl Panel {
             }
             Event::RequestFailed(id, error) => {
                 self.error = Some(failure(error));
+                self.catalog_failed(id);
                 if self.opening.is_some_and(|(request, _)| request == id) {
                     self.opening = None;
                 }
@@ -331,7 +383,7 @@ impl Panel {
                     if session
                         .send_request
                         .as_ref()
-                        .is_some_and(|(sent, _)| *sent == id)
+                        .is_some_and(|sent| sent.id == id)
                     {
                         session.send_request = None;
                         session.status = Some(TurnStatus::Failed);
@@ -342,45 +394,70 @@ impl Panel {
                 }
             }
             Event::SessionOpened(id, session, history) => {
-                let send = self
-                    .opening
-                    .take()
-                    .is_some_and(|(request, send)| id == request && send);
-                self.selected = Some(session.id.clone());
-                self.follow = true;
-                let mut conversation = Conversation::new(session);
-                for turn in history {
-                    for item in turn.items {
-                        if conversation.cards.len() == MAX_CARDS {
-                            conversation.cards.pop_front();
+                if self.opening.is_none_or(|(request, _)| request != id) {
+                    return;
+                }
+                let send = self.opening.take().is_some_and(|(_, send)| send);
+                let key = session.id.clone();
+                self.remember_session(&session);
+                let conversation = self
+                    .conversations
+                    .entry(key.clone())
+                    .or_insert_with(|| Conversation::new(session.clone()));
+                conversation.loaded = true;
+                conversation.session = session;
+                if conversation.model.is_none() && !history.is_empty() {
+                    conversation.model = conversation.session.model.clone();
+                    conversation.effort = conversation.session.effort.clone();
+                }
+                if !history.is_empty() && conversation.running.is_none() {
+                    conversation.cards.clear();
+                    for turn in history {
+                        for item in turn.items {
+                            if conversation.cards.len() == MAX_CARDS {
+                                conversation.cards.pop_front();
+                            }
+                            conversation
+                                .cards
+                                .push_back(Card::new(turn.key.clone(), item, true));
                         }
-                        conversation
-                            .cards
-                            .push_back(Card::new(turn.key.clone(), item, true));
-                    }
-                    conversation.status = Some(turn.status);
-                    if turn.status == TurnStatus::Running {
-                        conversation.running = Some(turn.key);
+                        conversation.status = Some(turn.status);
+                        if turn.status == TurnStatus::Running {
+                            conversation.running = Some(turn.key);
+                        } else {
+                            conversation.finished = Some(turn.key);
+                        }
                     }
                 }
-                self.conversations
-                    .insert(conversation.session.id.clone(), conversation);
+                self.select(key);
                 if send {
                     self.send();
                 }
             }
             Event::TurnStarted(request, turn) => {
                 if let Some(session) = self.conversations.get_mut(&turn.session) {
-                    if let Some((id, sent)) = &session.send_request
-                        && request == Some(*id)
+                    if session
+                        .send_request
+                        .as_ref()
+                        .is_some_and(|sent| request == Some(sent.id))
+                        && let Some(sent) = session.send_request.take()
                     {
-                        if Some(&turn.session) == self.selected.as_ref()
-                            && self.field.text() == sent
-                        {
-                            self.field.set_text("");
-                            self.attachment = None;
+                        let (field, attachment) = if Some(&turn.session) == self.selected.as_ref() {
+                            (&mut self.field, &mut self.attachment)
+                        } else {
+                            (&mut session.draft, &mut session.attachment)
+                        };
+                        if field.text() == sent.text {
+                            field.set_text("");
                         }
-                        session.send_request = None;
+                        if matches!((&sent.attachment, &*attachment),
+                            (Some(sent), Some(current)) if std::rc::Rc::ptr_eq(sent, current))
+                        {
+                            *attachment = None;
+                        }
+                    }
+                    if session.finished.as_ref() == Some(&turn) {
+                        return;
                     }
                     if session.change_turn.as_ref() != Some(&turn) {
                         session.change_turn = Some(turn.clone());
@@ -392,11 +469,15 @@ impl Panel {
             }
             Event::TurnEnded(turn, status) => {
                 if let Some(session) = self.conversations.get_mut(&turn.session)
-                    && session.running.as_ref() == Some(&turn)
+                    && session
+                        .running
+                        .as_ref()
+                        .is_none_or(|running| running == &turn)
                 {
                     session.running = None;
                     session.stop_request = None;
                     session.status = Some(status);
+                    session.finished = Some(turn);
                 }
             }
             Event::Item(turn, item, done) => {
@@ -456,18 +537,23 @@ impl Panel {
                 }
             }
             Event::Approval(approval) => {
+                if self.selected.as_ref() == Some(&approval.turn.session) {
+                    self.show_tab(Tab::Chat);
+                }
                 if self.approvals.is_empty() {
                     self.scroll = 0.0;
                 }
                 self.approvals.push(approval);
             }
             Event::ApprovalResolved(id) => self.approvals.retain(|approval| approval.id != id),
-            Event::Tokens(turn, total, _) => {
+            Event::Tokens(turn, total, last) => {
                 if let Some(session) = self.conversations.get_mut(&turn.session) {
-                    session.tokens = total;
+                    session.tokens = (total, last);
                 }
             }
-            Event::Acknowledged(_) | Event::History(..) | Event::Models(..) => {}
+            Event::History(id, sessions, next) => self.history_received(id, sessions, next),
+            Event::Models(id, models, next) => self.models_received(id, models, next),
+            Event::Acknowledged(_) => {}
         }
     }
 }
@@ -493,6 +579,31 @@ impl App {
         self.config.agent_enabled.unwrap_or(true)
     }
 
+    pub(crate) fn agent_writers(&self) -> Option<(&Path, usize)> {
+        let panel = self.agent.as_ref()?;
+        let root = panel.root.as_deref()?;
+        Some((root, panel.writer_count()))
+    }
+
+    pub(crate) fn set_agent_parallel(&mut self, parallel: bool) {
+        if let Some(panel) = &mut self.agent
+            && panel.workspace_parallel != parallel
+        {
+            panel.workspace_parallel = parallel;
+            if panel.shown {
+                self.request_redraw();
+            }
+        }
+    }
+
+    pub(super) fn close_agent(&mut self) {
+        self.agent.take();
+        if self.focus == Focus::Agent {
+            self.focus = Focus::Editor;
+            self.ime.field_preedit.clear();
+        }
+    }
+
     pub(super) fn toggle_agent(&mut self) {
         if !self.agent_enabled() {
             self.flash(t!("agent-disabled"));
@@ -509,6 +620,8 @@ impl App {
             }
             if panel.any_active() {
                 self.flash(t!("agent-continues"));
+            } else {
+                panel.provider = None;
             }
         } else {
             let panel = self.agent.get_or_insert_with(|| Box::new(Panel::new()));
@@ -531,13 +644,25 @@ impl App {
             .map(|workspace| workspace.root.clone());
         let executable = self.config.agent_executable.as_deref().map(PathBuf::from);
         let Some(panel) = &mut self.agent else { return };
+        panel.provider = None;
+        panel.connection = Connection::Unavailable;
         let Some(root) = root else {
+            panel.root = None;
             panel.error = Some(t!("agent-no-workspace").into());
             return;
         };
         if winc_backend::is_remote(&root) {
+            panel.root = None;
             panel.error = Some(t!("agent-remote").into());
             return;
+        }
+        if panel.root.as_ref() != Some(&root) {
+            panel.catalog = Catalog::default();
+            panel.conversations.clear();
+            panel.selected = None;
+            panel.attachment = None;
+            panel.default_model = None;
+            panel.default_effort = None;
         }
         panel.root = Some(root.clone());
         let Some(proxy) = self.link.proxy.clone() else {
@@ -551,8 +676,10 @@ impl App {
                 panel.provider = Some(provider);
                 panel.connection = Connection::Connecting;
                 panel.error = None;
-                panel.conversations.clear();
-                panel.selected = None;
+                for session in panel.conversations.values_mut() {
+                    session.loaded = false;
+                }
+                panel.catalog = Catalog::default();
             }
             Err(_) => panel.error = Some(failure(Failure::Start)),
         }
@@ -575,6 +702,9 @@ impl App {
             panel.event(event);
         }
         let shown = panel.shown;
+        if !shown && !panel.any_active() {
+            panel.provider = None;
+        }
         if !touched.is_empty() {
             self.sync_documents(|path| touched.iter().any(|changed| changed == path));
         }
@@ -720,9 +850,15 @@ impl App {
                 }
                 Hit::Attach(selection) => self.agent_attach(selection),
                 Hit::Detach => panel.attachment = None,
-                Hit::Changes => {
-                    panel.show_changes = !panel.show_changes;
-                    panel.scroll = 0.0;
+                Hit::Show(tab) => panel.show_tab(if panel.tab == tab { Tab::Chat } else { tab }),
+                Hit::ChooseSession(id) => panel.choose(id),
+                Hit::ChooseModel(id) => panel.choose_model(id),
+                Hit::ChooseEffort(effort) => panel.choose_effort(effort),
+                Hit::More => panel.next_page(),
+                Hit::SwitchProject => {
+                    if !panel.any_active() {
+                        self.connect_agent();
+                    }
                 }
                 Hit::Open(link, diff) => self.agent_open_link(link, diff),
                 Hit::Decide(approval, accept) => {
