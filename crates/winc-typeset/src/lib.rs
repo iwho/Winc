@@ -643,6 +643,8 @@ pub struct Cx<'a, 'f> {
     pub preedit: bool,
     /// 代码块是否在左侧显示从 1 起的行号。
     pub line_numbers: bool,
+    /// Additional vertical space above code text for inline actions.
+    pub code_header: f32,
     /// mermaid 图的高度上限（逻辑像素），不限时为无穷大。
     pub tall: f32,
     /// 当前顶层块是文中第几个内容相同的块（从 0 起），见 `Cx::toggle_id`。

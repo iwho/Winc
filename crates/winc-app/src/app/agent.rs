@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 
+mod composer;
 mod editor;
 mod sessions;
 pub(crate) use editor::Link;
@@ -9,14 +10,16 @@ use sessions::Catalog;
 pub(crate) use sessions::Tab;
 
 use winc_agent::{
-    AgentProvider, Approval, CodexProvider, Command, DeltaKind, Event, Failure, Item, ItemKind,
-    Session, SubmitError, TurnKey, TurnStatus,
+    AgentProvider, Approval, ApprovalDecision, CodexProvider, Command, DeltaKind, Event, Failure,
+    Item, ItemKind, LineChanges, Session, SubmitError, TurnKey, TurnStatus,
 };
 use winc_i18n::t;
 
 use super::*;
 
-const MAX_CARDS: usize = 600;
+const MAX_CARDS: usize = 10_000;
+const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
+const ESTIMATED_HEIGHT: f32 = 52.0;
 const MAX_BODY: usize = winc_agent::MAX_PROMPT;
 const MAX_OUTPUT: usize = 24 * 1024;
 
@@ -25,7 +28,8 @@ pub(crate) struct Card {
     pub(crate) item: Item,
     pub(crate) done: bool,
     pub(crate) expanded: bool,
-    pub(crate) markdown: Option<winc_preview::markdown::Markdown>,
+    pub(crate) height: f32,
+    pub(crate) dirty: bool,
     pub(crate) layout: Option<crate::view::agent::CardLayout>,
 }
 
@@ -36,7 +40,8 @@ impl Card {
             item,
             done,
             expanded: false,
-            markdown: None,
+            height: ESTIMATED_HEIGHT,
+            dirty: true,
             layout: None,
         }
     }
@@ -44,25 +49,233 @@ impl Card {
 
 struct Submission {
     id: u64,
+    steer: bool,
     text: String,
     attachment: Option<std::rc::Rc<editor::Attachment>>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TextPoint {
+    pub(crate) section: usize,
+    pub(crate) offset: usize,
+}
+
+pub(crate) struct TextHit {
+    pub(crate) card: usize,
+    pub(crate) point: TextPoint,
+    pub(crate) rect: Rect,
+    pub(crate) x: f32,
+    pub(crate) advances: std::sync::Arc<[f32]>,
+}
+
+impl TextHit {
+    fn position(&self, x: f32) -> TextPoint {
+        let mut edge = self.x;
+        let mut offset = self.point.offset;
+        for width in self.advances.iter().copied() {
+            if x < edge + width * 0.5 {
+                break;
+            }
+            edge += width;
+            offset += 1;
+        }
+        TextPoint {
+            offset,
+            ..self.point
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TextSelection {
+    pub(crate) card: usize,
+    pub(crate) anchor: TextPoint,
+    pub(crate) head: TextPoint,
+}
+
+impl TextSelection {
+    pub(crate) fn ordered(self) -> (TextPoint, TextPoint) {
+        (self.anchor.min(self.head), self.anchor.max(self.head))
+    }
+}
+
+pub(crate) struct Transcript {
+    pub(crate) cards: VecDeque<Card>,
+    indices: HashMap<(TurnKey, String), usize>,
+    bytes: usize,
+    pub(crate) first: usize,
+    pub(crate) anchor: Option<(usize, f32)>,
+    pub(crate) unread: bool,
+    pub(crate) laid: std::ops::Range<usize>,
+}
+
+impl Default for Transcript {
+    fn default() -> Self {
+        Self {
+            cards: VecDeque::new(),
+            indices: HashMap::new(),
+            bytes: 0,
+            first: MAX_CARDS,
+            anchor: None,
+            unread: false,
+            laid: 0..0,
+        }
+    }
+}
+
+impl Transcript {
+    fn pop_front(&mut self) -> Option<Card> {
+        let card = self.cards.pop_front()?;
+        self.first += 1;
+        self.bytes -= card.item.text.len() + card.item.output.len();
+        self.indices
+            .remove(&(card.turn.clone(), card.item.id.clone()));
+        Some(card)
+    }
+
+    fn clear(&mut self) {
+        self.first += self.cards.len() + MAX_CARDS;
+        self.cards.clear();
+        self.indices.clear();
+        self.bytes = 0;
+        self.anchor = None;
+        self.unread = false;
+        self.laid = 0..0;
+    }
+
+    fn push(&mut self, card: Card) {
+        if self.cards.len() == MAX_CARDS {
+            self.pop_front();
+        }
+        self.bytes += card.item.text.len() + card.item.output.len();
+        self.indices.insert(
+            (card.turn.clone(), card.item.id.clone()),
+            self.first + self.cards.len(),
+        );
+        self.cards.push_back(card);
+    }
+
+    fn prepend(&mut self, turns: Vec<winc_agent::Turn>) -> bool {
+        for turn in turns.into_iter().rev() {
+            for item in turn.items.into_iter().rev() {
+                let key = (turn.key.clone(), item.id.clone());
+                if self.indices.contains_key(&key) {
+                    continue;
+                }
+                let bytes = item.text.len() + item.output.len();
+                if self.cards.len() >= MAX_CARDS || self.bytes + bytes > MAX_TRANSCRIPT_BYTES {
+                    return false;
+                }
+                self.first -= 1;
+                self.bytes += bytes;
+                self.indices.insert(key, self.first);
+                self.cards
+                    .push_front(Card::new(turn.key.clone(), item, true));
+            }
+        }
+        true
+    }
+
+    fn update(
+        &mut self,
+        turn: TurnKey,
+        id: String,
+        kind: ItemKind,
+        update: impl FnOnce(&mut Card),
+    ) {
+        let key = (turn, id);
+        let ordinal = match self.indices.get(&key) {
+            Some(&ordinal) => ordinal,
+            None => {
+                self.unread |= self.anchor.is_some();
+                self.push(Card::new(
+                    key.0,
+                    Item {
+                        id: key.1,
+                        kind,
+                        text: String::new(),
+                        output: String::new(),
+                        status: String::new(),
+                        files: Vec::new(),
+                        file_stats: Vec::new(),
+                    },
+                    false,
+                ));
+                self.first + self.cards.len() - 1
+            }
+        };
+        let card = &mut self.cards[ordinal - self.first];
+        self.bytes -= card.item.text.len() + card.item.output.len();
+        update(card);
+        self.bytes += card.item.text.len() + card.item.output.len();
+    }
+
+    fn card_mut(&mut self, ordinal: usize) -> Option<&mut Card> {
+        self.cards.get_mut(ordinal.checked_sub(self.first)?)
+    }
+
+    pub(crate) fn scroll(&mut self, pixels: f32, viewport: f32) {
+        let Some(last) = self.cards.len().checked_sub(1) else {
+            return;
+        };
+        let (bottom, bottom_offset) = self.bottom(viewport);
+        let (mut row, mut offset) = self
+            .anchor
+            .map_or((bottom, bottom_offset), |(row, offset)| {
+                (row.saturating_sub(self.first).min(last), offset)
+            });
+        offset += pixels;
+        while offset < 0.0 && row > 0 {
+            row -= 1;
+            offset += self.cards[row].height;
+        }
+        while row < last && offset >= self.cards[row].height {
+            offset -= self.cards[row].height;
+            row += 1;
+        }
+        if (bottom == 0 && bottom_offset == 0.0)
+            || pixels > 0.0 && (row > bottom || (row == bottom && offset >= bottom_offset - 1.0))
+        {
+            self.follow();
+        } else {
+            self.anchor = Some((self.first + row, offset.max(0.0)));
+        }
+    }
+
+    pub(crate) fn bottom(&self, viewport: f32) -> (usize, f32) {
+        let mut remaining = viewport;
+        for (i, card) in self.cards.iter().enumerate().rev() {
+            remaining -= card.height;
+            if remaining <= 0.0 {
+                return (i, -remaining);
+            }
+        }
+        (0, 0.0)
+    }
+
+    pub(crate) fn follow(&mut self) {
+        self.anchor = None;
+        self.unread = false;
+    }
+}
+
 struct Conversation {
     session: Session,
-    cards: VecDeque<Card>,
+    transcript: Transcript,
     running: Option<TurnKey>,
     send_request: Option<Submission>,
     stop_request: Option<u64>,
     status: Option<TurnStatus>,
-    tokens: (u64, u64),
+    tokens: (u64, u64, Option<u64>),
     draft: TextField,
     attachment: Option<std::rc::Rc<editor::Attachment>>,
     model: Option<String>,
     effort: Option<String>,
     loaded: bool,
+    older_cursor: Option<String>,
+    older_request: Option<u64>,
     finished: Option<TurnKey>,
-    changes: BTreeMap<PathBuf, bool>,
+    changes: BTreeMap<PathBuf, editor::Change>,
     change_turn: Option<TurnKey>,
 }
 
@@ -70,61 +283,41 @@ impl Conversation {
     fn new(session: Session) -> Self {
         Self {
             session,
-            cards: VecDeque::new(),
+            transcript: Transcript::default(),
             running: None,
             send_request: None,
             stop_request: None,
             status: None,
-            tokens: (0, 0),
+            tokens: (0, 0, None),
             draft: TextField::multiline(),
             attachment: None,
             model: None,
             effort: None,
             loaded: true,
+            older_cursor: None,
+            older_request: None,
             finished: None,
             changes: BTreeMap::new(),
             change_turn: None,
         }
-    }
-
-    fn card(&mut self, turn: TurnKey, id: String, kind: ItemKind) -> &mut Card {
-        let index = self
-            .cards
-            .iter()
-            .rposition(|card| card.turn == turn && card.item.id == id);
-        if let Some(index) = index {
-            return &mut self.cards[index];
-        }
-        if self.cards.len() == MAX_CARDS {
-            self.cards.pop_front();
-        }
-        self.cards.push_back(Card::new(
-            turn,
-            Item {
-                id,
-                kind,
-                text: String::new(),
-                output: String::new(),
-                status: String::new(),
-                files: Vec::new(),
-            },
-            false,
-        ));
-        self.cards.back_mut().expect("card just inserted")
     }
 }
 
 #[derive(Clone)]
 pub(crate) enum Hit {
     New,
+    Close,
     Send,
     Stop,
     Retry,
     CopyMessage(usize),
-    CopyCode(usize, usize),
+    CopyCode(std::sync::Arc<str>),
+    Follow,
+    Complete(usize),
     CopyApproval,
     Expand(usize),
-    Decide(u64, bool),
+    ScrollTable(usize, usize, usize, f32),
+    Decide(u64, ApprovalDecision),
     Attach(bool),
     Detach,
     Show(Tab),
@@ -132,6 +325,7 @@ pub(crate) enum Hit {
     ChooseModel(String),
     ChooseEffort(String),
     More,
+    Older,
     SwitchProject,
     Open(Link, bool),
 }
@@ -148,7 +342,6 @@ pub(crate) enum Connection {
 pub(crate) struct PanelRects {
     pub(crate) body: Rect,
     pub(crate) divider: Rect,
-    pub(crate) button: Rect,
 }
 
 pub(crate) struct Panel {
@@ -156,14 +349,17 @@ pub(crate) struct Panel {
     pub(crate) rects: PanelRects,
     pub(crate) width: f32,
     pub(crate) field: TextField,
+    pub(crate) completion: composer::Completion,
     pub(crate) connection: Connection,
     pub(crate) error: Option<String>,
     pub(crate) root: Option<PathBuf>,
+    pub(crate) standalone: bool,
     pub(crate) hits: Vec<(Rect, Hit)>,
     pub(crate) viewport: Rect,
+    pub(crate) text_hits: Vec<TextHit>,
+    pub(crate) selection: Option<TextSelection>,
     pub(crate) scroll: f32,
     pub(crate) max_scroll: f32,
-    pub(crate) follow: bool,
     pub(crate) workspace_parallel: bool,
     pub(crate) attachment: Option<std::rc::Rc<editor::Attachment>>,
     pub(crate) tab: Tab,
@@ -184,14 +380,17 @@ impl Panel {
             rects: PanelRects::default(),
             width: 390.0,
             field: TextField::multiline(),
+            completion: composer::Completion::default(),
             connection: Connection::Unavailable,
             error: None,
             root: None,
+            standalone: false,
             hits: Vec::new(),
             viewport: Rect::default(),
+            text_hits: Vec::new(),
+            selection: None,
             scroll: 0.0,
             max_scroll: 0.0,
-            follow: true,
             workspace_parallel: false,
             attachment: None,
             tab: Tab::Chat,
@@ -214,11 +413,17 @@ impl Panel {
         self.conversations.get_mut(self.selected.as_deref()?)
     }
 
-    pub(crate) fn cards(&mut self) -> Option<&mut VecDeque<Card>> {
-        self.current_mut().map(|session| &mut session.cards)
+    pub(crate) fn transcript(&mut self) -> Option<&mut Transcript> {
+        self.current_mut().map(|session| &mut session.transcript)
     }
 
-    pub(crate) fn changes(&self) -> Option<&BTreeMap<PathBuf, bool>> {
+    pub(crate) fn session_title(&self) -> Option<&str> {
+        self.current()
+            .map(|session| session.session.title.as_str())
+            .filter(|title| !title.is_empty())
+    }
+
+    pub(crate) fn changes(&self) -> Option<&BTreeMap<PathBuf, editor::Change>> {
         self.current().map(|session| &session.changes)
     }
 
@@ -239,7 +444,10 @@ impl Panel {
         self.connection == Connection::Ready
             && self.catalog_ready()
             && self.opening.is_none()
-            && !self.busy()
+            && self.approval().is_none()
+            && self.current().is_none_or(|session| {
+                session.send_request.is_none() && session.stop_request.is_none()
+            })
             && self.current().is_none_or(|session| session.loaded)
             && (!self.field.text().trim().is_empty() || self.attachment.is_some())
     }
@@ -277,28 +485,24 @@ impl Panel {
     }
 
     fn limit_transcripts(&mut self) {
-        const CONVERSATION_BYTES: usize = 8 * 1024 * 1024;
         const PANEL_BYTES: usize = 32 * 1024 * 1024;
-        let bytes = |card: &Card| card.item.text.len() + card.item.output.len();
         let mut total = 0;
         for session in self.conversations.values_mut() {
-            let mut size: usize = session.cards.iter().map(bytes).sum();
-            while size > CONVERSATION_BYTES {
-                if let Some(card) = session.cards.pop_front() {
-                    size -= bytes(&card);
-                }
+            let chat = &mut session.transcript;
+            while chat.bytes > MAX_TRANSCRIPT_BYTES {
+                chat.pop_front();
             }
-            total += size;
+            total += chat.bytes;
         }
         if total > PANEL_BYTES {
             for session in self.conversations.values_mut().filter(|session| {
                 self.selected.as_ref() != Some(&session.session.id) && session.running.is_none()
             }) {
                 while total > PANEL_BYTES {
-                    let Some(card) = session.cards.pop_front() else {
+                    let Some(card) = session.transcript.pop_front() else {
                         break;
                     };
-                    total -= bytes(&card);
+                    total -= card.item.text.len() + card.item.output.len();
                 }
             }
         }
@@ -306,14 +510,14 @@ impl Panel {
             let Some(session) = self
                 .conversations
                 .values_mut()
-                .max_by_key(|s| s.cards.len())
+                .max_by_key(|s| s.transcript.cards.len())
             else {
                 break;
             };
-            let Some(card) = session.cards.pop_front() else {
+            let Some(card) = session.transcript.pop_front() else {
                 break;
             };
-            total -= bytes(&card);
+            total -= card.item.text.len() + card.item.output.len();
         }
     }
 
@@ -336,6 +540,49 @@ impl Panel {
                     .into(),
                 );
                 None
+            }
+        }
+    }
+
+    pub(super) fn scroll_viewport(&mut self, pixels: f32) {
+        if self.tab == Tab::Chat && self.approval().is_none() {
+            let viewport = self.viewport.h;
+            if let Some(chat) = self.transcript() {
+                chat.scroll(pixels, viewport);
+            }
+        } else {
+            self.scroll = (self.scroll + pixels).clamp(0.0, self.max_scroll);
+        }
+    }
+
+    pub(crate) fn older(&self) -> Option<bool> {
+        let session = self.current()?;
+        session.older_cursor.as_ref()?;
+        (session.loaded && session.transcript.cards.len() < MAX_CARDS)
+            .then_some(session.older_request.is_none())
+    }
+
+    fn load_older(&mut self) {
+        if self.older() != Some(true) {
+            return;
+        }
+        let Some(session) = self.current() else {
+            return;
+        };
+        let Some(cursor) = session.older_cursor.clone() else {
+            return;
+        };
+        let command = Command::Older {
+            session: session.session.id.clone(),
+            cursor,
+        };
+        if let Some(id) = self.submit(command) {
+            let viewport = self.viewport.h;
+            let session = self.current_mut().expect("selected session");
+            session.older_request = Some(id);
+            if session.transcript.anchor.is_none() {
+                let (row, offset) = session.transcript.bottom(viewport);
+                session.transcript.anchor = Some((session.transcript.first + row, offset));
             }
         }
     }
@@ -366,19 +613,53 @@ impl Panel {
             return;
         }
         let attachment = self.attachment.clone();
-        let command = Command::Send {
-            session: session.session.id.clone(),
-            text: prompt,
-            model: self.model().map(|model| model.id.clone()),
-            effort: self.effort().map(str::to_owned),
+        let steer = session.running.is_some();
+        let command = if let Some(turn) = session.running.clone() {
+            Command::Steer { turn, text: prompt }
+        } else {
+            Command::Send {
+                session: session.session.id.clone(),
+                text: prompt,
+                model: self.model().map(|model| model.id.clone()),
+                effort: self.effort().map(str::to_owned),
+            }
         };
         if let Some(id) = self.submit(command) {
             self.current_mut().expect("selected session").send_request = Some(Submission {
                 id,
+                steer,
                 text,
                 attachment,
             });
             self.show_tab(Tab::Chat);
+        }
+    }
+
+    fn acknowledge_submission(&mut self, session_id: &str, request: u64, steer: bool) {
+        let Some(session) = self.conversations.get_mut(session_id) else {
+            return;
+        };
+        if !session
+            .send_request
+            .as_ref()
+            .is_some_and(|sent| sent.id == request && sent.steer == steer)
+        {
+            return;
+        }
+        let sent = session.send_request.take().expect("matching submission");
+        let (field, attachment) = if self.selected.as_deref() == Some(session_id) {
+            (&mut self.field, &mut self.attachment)
+        } else {
+            (&mut session.draft, &mut session.attachment)
+        };
+        field.remember_text(&sent.text);
+        if field.text() == sent.text {
+            field.set_text("");
+        }
+        if matches!((&sent.attachment, &*attachment),
+            (Some(sent), Some(current)) if std::rc::Rc::ptr_eq(sent, current))
+        {
+            *attachment = None;
         }
     }
 
@@ -416,6 +697,7 @@ impl Panel {
                 self.approvals.clear();
                 for session in self.conversations.values_mut() {
                     session.loaded = false;
+                    session.older_request = None;
                     if session.running.take().is_some() || session.send_request.take().is_some() {
                         session.status = Some(TurnStatus::Failed);
                     }
@@ -434,16 +716,19 @@ impl Panel {
                         .send_request
                         .as_ref()
                         .is_some_and(|sent| sent.id == id)
+                        && session.send_request.take().is_some_and(|sent| !sent.steer)
                     {
-                        session.send_request = None;
                         session.status = Some(TurnStatus::Failed);
+                    }
+                    if session.older_request == Some(id) {
+                        session.older_request = None;
                     }
                     if session.stop_request == Some(id) {
                         session.stop_request = None;
                     }
                 }
             }
-            Event::SessionOpened(id, session, history) => {
+            Event::SessionOpened(id, session, history, older_cursor) => {
                 if self.opening.is_none_or(|(request, _)| request != id) {
                     return;
                 }
@@ -455,21 +740,34 @@ impl Panel {
                     .entry(key.clone())
                     .or_insert_with(|| Conversation::new(session.clone()));
                 conversation.loaded = true;
+                conversation.older_cursor = older_cursor;
                 conversation.session = session;
                 if conversation.model.is_none() && !history.is_empty() {
                     conversation.model = conversation.session.model.clone();
                     conversation.effort = conversation.session.effort.clone();
                 }
                 if !history.is_empty() && conversation.running.is_none() {
-                    conversation.cards.clear();
+                    conversation.transcript.clear();
+                    conversation.changes.clear();
+                    conversation.change_turn = None;
+                    let root = self.root.as_deref();
+                    let last_turn = history.last().map(|turn| turn.key.clone());
                     for turn in history {
                         for item in turn.items {
-                            if conversation.cards.len() == MAX_CARDS {
-                                conversation.cards.pop_front();
+                            if Some(&turn.key) == last_turn.as_ref()
+                                && item.kind == ItemKind::FileChange
+                                && item.status == "completed"
+                                && let Some(root) = root
+                            {
+                                for (path, stat) in editor::reported_changes(root, &item) {
+                                    conversation.note_change(&turn.key, path, true, stat);
+                                }
                             }
-                            conversation
-                                .cards
-                                .push_back(Card::new(turn.key.clone(), item, true));
+                            conversation.transcript.push(Card::new(
+                                turn.key.clone(),
+                                item,
+                                turn.status != TurnStatus::Running,
+                            ));
                         }
                         conversation.status = Some(turn.status);
                         if turn.status == TurnStatus::Running {
@@ -484,28 +782,21 @@ impl Panel {
                     self.send();
                 }
             }
+            Event::Older(id, session, history, next) => {
+                if let Some(session) = self.conversations.get_mut(&session)
+                    && session.older_request == Some(id)
+                {
+                    session.older_request = None;
+                    let has_room = session.transcript.prepend(history);
+                    session.older_cursor = next
+                        .filter(|cursor| has_room && Some(cursor) != session.older_cursor.as_ref());
+                }
+            }
             Event::TurnStarted(request, turn) => {
+                if let Some(request) = request {
+                    self.acknowledge_submission(&turn.session, request, false);
+                }
                 if let Some(session) = self.conversations.get_mut(&turn.session) {
-                    if session
-                        .send_request
-                        .as_ref()
-                        .is_some_and(|sent| request == Some(sent.id))
-                        && let Some(sent) = session.send_request.take()
-                    {
-                        let (field, attachment) = if Some(&turn.session) == self.selected.as_ref() {
-                            (&mut self.field, &mut self.attachment)
-                        } else {
-                            (&mut session.draft, &mut session.attachment)
-                        };
-                        if field.text() == sent.text {
-                            field.set_text("");
-                        }
-                        if matches!((&sent.attachment, &*attachment),
-                            (Some(sent), Some(current)) if std::rc::Rc::ptr_eq(sent, current))
-                        {
-                            *attachment = None;
-                        }
-                    }
                     if session.finished.as_ref() == Some(&turn) {
                         return;
                     }
@@ -525,71 +816,114 @@ impl Panel {
                         .is_none_or(|running| running == &turn)
                 {
                     session.running = None;
+                    let terminal = match status {
+                        TurnStatus::Completed => "completed",
+                        TurnStatus::Failed => "failed",
+                        TurnStatus::Interrupted => "interrupted",
+                        TurnStatus::Running => "",
+                    };
+                    for card in session
+                        .transcript
+                        .cards
+                        .iter_mut()
+                        .rev()
+                        .take_while(|card| card.turn == turn)
+                    {
+                        if !card.done {
+                            card.done = true;
+                            card.item.status = terminal.into();
+                        }
+                    }
                     session.stop_request = None;
                     session.status = Some(status);
                     session.finished = Some(turn);
                 }
             }
             Event::Item(turn, item, done) => {
-                let files =
-                    if done && item.kind == ItemKind::FileChange && item.status == "completed" {
-                        editor::reported_files(self.root.as_deref(), &item.files)
-                    } else {
-                        Vec::new()
-                    };
+                let files = self
+                    .root
+                    .as_deref()
+                    .filter(|_| {
+                        done && item.kind == ItemKind::FileChange && item.status == "completed"
+                    })
+                    .map(|root| editor::reported_changes(root, &item))
+                    .unwrap_or_default();
                 if let Some(session) = self.conversations.get_mut(&turn.session) {
-                    if session
-                        .change_turn
-                        .as_ref()
-                        .is_none_or(|active| active == &turn)
+                    let first_completion = session
+                        .transcript
+                        .indices
+                        .get(&(turn.clone(), item.id.clone()))
+                        .and_then(|ordinal| {
+                            session
+                                .transcript
+                                .cards
+                                .get(ordinal - session.transcript.first)
+                        })
+                        .is_none_or(|card| !card.done);
+                    if first_completion
+                        && session
+                            .change_turn
+                            .as_ref()
+                            .is_none_or(|active| active == &turn)
                     {
-                        for file in files {
-                            session.note_change(&turn, file, true);
+                        for (file, stat) in files {
+                            session.note_change(&turn, file, true, stat);
                         }
                     }
-                    let card = session.card(turn, item.id.clone(), item.kind);
-                    let mut item = item;
-                    if item.output.is_empty() {
-                        item.output = std::mem::take(&mut card.item.output);
-                    }
-                    if item.text.is_empty() {
-                        item.text = std::mem::take(&mut card.item.text);
-                    }
-                    if item.files.is_empty() {
-                        item.files = std::mem::take(&mut card.item.files);
-                    }
-                    card.item = item;
-                    card.done = done;
-                    card.markdown = None;
-                    card.layout = None;
+                    session
+                        .transcript
+                        .update(turn, item.id.clone(), item.kind, |card| {
+                            let mut item = item;
+                            if item.output.is_empty() {
+                                item.output = std::mem::take(&mut card.item.output);
+                            }
+                            let text_changed = !item.text.is_empty() && card.item.text != item.text;
+                            if item.text.is_empty() {
+                                item.text = std::mem::take(&mut card.item.text);
+                            }
+                            if item.files.is_empty() {
+                                item.files = std::mem::take(&mut card.item.files);
+                            }
+                            card.dirty |= card.item.kind != item.kind
+                                || text_changed
+                                || card.expanded && card.item.output != item.output;
+                            card.item = item;
+                            card.done |= done;
+                        });
                 }
             }
             Event::Delta(turn, id, kind, text) => {
                 if let Some(session) = self.conversations.get_mut(&turn.session) {
-                    let card = session.card(
-                        turn,
-                        id,
-                        match kind {
-                            DeltaKind::Message => ItemKind::Message,
-                            DeltaKind::Output => ItemKind::Tool,
-                        },
-                    );
-                    card.layout = None;
-                    match kind {
-                        DeltaKind::Message => {
-                            append(&mut card.item.text, &text, MAX_BODY);
-                            card.markdown = None;
-                        }
-                        DeltaKind::Output => append(&mut card.item.output, &text, MAX_OUTPUT),
-                    }
+                    let item_kind = match kind {
+                        DeltaKind::Message => ItemKind::Message,
+                        DeltaKind::Plan => ItemKind::Plan,
+                        DeltaKind::Output => ItemKind::Tool,
+                    };
+                    session
+                        .transcript
+                        .update(turn, id, item_kind, |card| match kind {
+                            DeltaKind::Message | DeltaKind::Plan => {
+                                let before = card.item.text.len();
+                                append(&mut card.item.text, &text, MAX_BODY);
+                                card.dirty |= card.item.text.len() != before;
+                            }
+                            DeltaKind::Output => {
+                                let before = card.item.output.len();
+                                append(&mut card.item.output, &text, MAX_OUTPUT);
+                                card.dirty |= card.expanded && card.item.output.len() != before;
+                            }
+                        });
                 }
             }
             Event::Files(turn, id, files, patch) => {
                 if let Some(session) = self.conversations.get_mut(&turn.session) {
-                    let card = session.card(turn, id, ItemKind::FileChange);
-                    card.item.files = files;
-                    card.item.output = patch;
-                    card.layout = None;
+                    session
+                        .transcript
+                        .update(turn, id, ItemKind::FileChange, |card| {
+                            card.item.files = files;
+                            card.item.output = patch;
+                            card.dirty |= card.expanded;
+                        });
                 }
             }
             Event::Approval(approval) => {
@@ -610,9 +944,17 @@ impl Panel {
                 self.approvals.push(approval);
             }
             Event::ApprovalResolved(id) => self.approvals.retain(|approval| approval.id != id),
-            Event::Tokens(turn, total, last) => {
+            Event::ApprovalExpired(id) => {
+                if self.approval().is_some_and(|approval| approval.id == id) {
+                    self.error = Some(t!("agent-approval-expired").into());
+                }
+                self.approvals.retain(|approval| approval.id != id);
+            }
+            Event::SessionTitle(id, title) => self.title_received(&id, title),
+            Event::Steered(id, session) => self.acknowledge_submission(&session, id, true),
+            Event::Tokens(turn, total, last, window) => {
                 if let Some(session) = self.conversations.get_mut(&turn.session) {
-                    session.tokens = (total, last);
+                    session.tokens = (total, last, window);
                 }
             }
             Event::History(id, sessions, next) => self.history_received(id, sessions, next),
@@ -705,6 +1047,9 @@ impl App {
             .workspace
             .as_ref()
             .map(|workspace| workspace.root.clone());
+        let standalone = root.is_none();
+        let root = root
+            .or_else(|| winc_config::config_path().map(|path| path.with_file_name("codex-chat")));
         let executable = self.config.agent_executable.as_deref().map(PathBuf::from);
         let Some(panel) = &mut self.agent else { return };
         panel.provider = None;
@@ -719,7 +1064,7 @@ impl App {
             panel.error = Some(t!("agent-remote").into());
             return;
         }
-        if panel.root.as_ref() != Some(&root) {
+        if panel.root.as_ref() != Some(&root) || panel.standalone != standalone {
             panel.catalog = Catalog::default();
             panel.conversations.clear();
             panel.selected = None;
@@ -727,20 +1072,28 @@ impl App {
             panel.default_model = None;
             panel.default_effort = None;
         }
+        panel.standalone = standalone;
         panel.root = Some(root.clone());
+        panel.error = None;
         let Some(proxy) = self.link.proxy.clone() else {
             return;
         };
-        match CodexProvider::connect(root.clone(), executable, move || {
+        let wake = move || {
             let _ = proxy.send_event(UserEvent::Agent);
-        }) {
+        };
+        let connection = if standalone {
+            CodexProvider::connect_standalone(root, executable, wake)
+        } else {
+            CodexProvider::connect(root, executable, wake)
+        };
+        match connection {
             Ok(provider) => {
-                panel.root = Some(root);
                 panel.provider = Some(provider);
                 panel.connection = Connection::Connecting;
                 panel.error = None;
                 for session in panel.conversations.values_mut() {
                     session.loaded = false;
+                    session.older_request = None;
                 }
                 panel.catalog = Catalog::default();
             }
@@ -790,12 +1143,21 @@ impl App {
     }
 
     fn agent_project_matches(&mut self) -> bool {
-        let matches = self.agent.as_ref().and_then(|p| p.root.as_ref())
-            == self.editor.workspace.as_ref().map(|w| &w.root);
+        let matches = self
+            .agent
+            .as_ref()
+            .is_some_and(|panel| self.agent_matches_workspace(panel));
         if !matches {
             self.flash(t!("agent-project-changed"));
         }
         matches
+    }
+
+    pub(crate) fn agent_matches_workspace(&self, panel: &Panel) -> bool {
+        match &self.editor.workspace {
+            None => panel.standalone,
+            Some(workspace) => !panel.standalone && panel.root.as_ref() == Some(&workspace.root),
+        }
     }
 
     pub(crate) fn agent_rects(&self) -> PanelRects {
@@ -837,33 +1199,8 @@ impl App {
         }
     }
 
-    pub(super) fn layout_agent_button(&mut self) {
-        let Some(panel) = self
-            .agent
-            .as_mut()
-            .filter(|panel| panel.shown && panel.rects.body.w > 0.0)
-        else {
-            return;
-        };
-        let l = &mut self.layout;
-        let edge = if l.controls.w > 0.0 {
-            l.controls.x - 6.0
-        } else {
-            l.window.right() - 14.0
-        };
-        panel.rects.button = Rect::new(edge - 72.0, l.sidebar_button.y, 72.0, BUTTON);
-        l.tabs.w = l
-            .tabs
-            .w
-            .min((panel.rects.button.x - 6.0 - l.tabs.x).max(0.0));
-    }
-
     pub(in crate::app) fn agent_click(&mut self, x: f32, y: f32) -> bool {
         let rects = self.agent_rects();
-        if rects.button.contains(x, y) {
-            self.toggle_agent();
-            return true;
-        }
         if rects.divider.contains(x, y) {
             self.pointer.drag = Drag::AgentDivider {
                 grab: x - rects.body.x,
@@ -877,6 +1214,7 @@ impl App {
             return false;
         };
         if panel.field.view.area.contains(x, y) {
+            panel.selection = None;
             self.focus = Focus::Agent;
             self.click_field(x, y);
         } else if let Some(hit) = panel
@@ -893,7 +1231,9 @@ impl App {
                             .new_conversation(false);
                     }
                 }
+                Hit::Close => self.toggle_agent(),
                 Hit::Send => self.agent_send(),
+                Hit::Complete(index) => self.agent_complete(index),
                 Hit::Stop => panel.stop(),
                 Hit::Retry => {
                     if !panel.any_active() {
@@ -901,20 +1241,15 @@ impl App {
                     }
                 }
                 Hit::CopyMessage(index) => {
-                    if let Some(card) = panel.cards().and_then(|cards| cards.get(index)) {
+                    if let Some(card) = panel.transcript().and_then(|chat| chat.card_mut(index)) {
                         let text = card.item.text.clone();
                         self.set_clipboard(text, false);
                     }
                 }
-                Hit::CopyCode(index, block) => {
-                    if let Some(winc_preview::markdown::Block::Code { text, .. }) = panel
-                        .cards()
-                        .and_then(|cards| cards.get(index))
-                        .and_then(|card| card.markdown.as_ref())
-                        .and_then(|md| md.blocks.get(block))
-                    {
-                        let text = text.clone();
-                        self.set_clipboard(text, false);
+                Hit::CopyCode(text) => self.set_clipboard(text.to_string(), false),
+                Hit::Follow => {
+                    if let Some(chat) = panel.transcript() {
+                        chat.follow();
                     }
                 }
                 Hit::CopyApproval => {
@@ -924,8 +1259,17 @@ impl App {
                     }
                 }
                 Hit::Expand(index) => {
-                    if let Some(card) = panel.cards().and_then(|cards| cards.get_mut(index)) {
+                    if let Some(card) = panel.transcript().and_then(|chat| chat.card_mut(index)) {
                         card.expanded = !card.expanded;
+                    }
+                }
+                Hit::ScrollTable(card, section, table, pixels) => {
+                    if let Some(layout) = panel
+                        .transcript()
+                        .and_then(|chat| chat.card_mut(card))
+                        .and_then(|card| card.layout.as_mut())
+                    {
+                        layout.scroll_table(section, table, pixels);
                     }
                 }
                 Hit::Attach(selection) => self.agent_attach(selection),
@@ -935,18 +1279,79 @@ impl App {
                 Hit::ChooseModel(id) => panel.choose_model(id),
                 Hit::ChooseEffort(effort) => panel.choose_effort(effort),
                 Hit::More => panel.next_page(),
+                Hit::Older => panel.load_older(),
                 Hit::SwitchProject => {
                     if !panel.any_active() {
                         self.connect_agent();
                     }
                 }
                 Hit::Open(link, diff) => self.agent_open_link(link, diff),
-                Hit::Decide(approval, accept) => {
-                    panel.submit(Command::Approve { approval, accept });
+                Hit::Decide(approval, decision) => {
+                    panel.submit(Command::Approve { approval, decision });
                 }
             }
+        } else if let Some(hit) = panel.text_hits.iter().find(|hit| hit.rect.contains(x, y)) {
+            let point = hit.position(x);
+            panel.selection = Some(TextSelection {
+                card: hit.card,
+                anchor: point,
+                head: point,
+            });
+            self.focus = Focus::Agent;
+            self.pointer.drag = Drag::AgentText;
+        } else {
+            panel.selection = None;
         }
         self.request_redraw();
+        true
+    }
+
+    pub(in crate::app) fn drag_agent_text(&mut self, x: f32, y: f32) {
+        let Some(panel) = &mut self.agent else { return };
+        let Some(selection) = &mut panel.selection else {
+            return;
+        };
+        let distance = |value: f32, start: f32, end: f32| (start - value).max(value - end).max(0.0);
+        if let Some(hit) = panel
+            .text_hits
+            .iter()
+            .filter(|hit| hit.card == selection.card)
+            .min_by(|a, b| {
+                let score = |hit: &TextHit| {
+                    (
+                        (y - hit.rect.y - hit.rect.h * 0.5).abs(),
+                        distance(x, hit.rect.x, hit.rect.right()),
+                    )
+                };
+                let a = score(a);
+                let b = score(b);
+                a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1))
+            })
+        {
+            selection.head = hit.position(x);
+            self.request_redraw();
+        }
+    }
+
+    pub(super) fn copy_agent_text(&mut self) -> bool {
+        let Some(panel) = &mut self.agent else {
+            return false;
+        };
+        let Some(selection) = panel.selection.filter(|s| s.anchor != s.head) else {
+            return false;
+        };
+        let Some(layout) = panel
+            .transcript()
+            .and_then(|chat| chat.card_mut(selection.card))
+            .and_then(|card| card.layout.as_ref())
+        else {
+            return false;
+        };
+        let text = layout.selected_text(selection);
+        if text.is_empty() {
+            return false;
+        }
+        self.set_clipboard(text, false);
         true
     }
 
@@ -966,8 +1371,7 @@ impl App {
             if panel.field.view.area.contains(x, y) {
                 panel.field.wheel_scroll(pixels);
             } else if panel.viewport.contains(x, y) {
-                panel.scroll = (panel.scroll + pixels).clamp(0.0, panel.max_scroll);
-                panel.follow = panel.scroll >= panel.max_scroll - 1.0;
+                panel.scroll_viewport(pixels);
             }
             self.request_redraw();
         }
@@ -996,6 +1400,7 @@ mod tests {
                 effort: None,
             },
             Vec::new(),
+            None,
         ));
         let turn = TurnKey {
             session: "chat".into(),
@@ -1018,13 +1423,13 @@ mod tests {
             panel
                 .hits
                 .iter()
-                .any(|(_, hit)| matches!(hit, Hit::CopyMessage(0)))
+                .any(|(_, hit)| matches!(hit, Hit::CopyMessage(MAX_CARDS)))
         );
         assert!(
             panel
                 .hits
                 .iter()
-                .any(|(_, hit)| matches!(hit, Hit::CopyCode(0, _)))
+                .any(|(_, hit)| matches!(hit, Hit::CopyCode(_)))
         );
         panel.event(Event::Approval(Approval {
             id: 55,
@@ -1033,6 +1438,7 @@ mod tests {
             kind: winc_agent::ApprovalKind::Command,
             details: "echo hello".into(),
             reviewable: true,
+            decisions: vec![ApprovalDecision::Accept, ApprovalDecision::Decline],
         }));
         paint(&mut app);
         let panel = app.agent.as_ref().unwrap();
@@ -1040,13 +1446,13 @@ mod tests {
             panel
                 .hits
                 .iter()
-                .any(|(_, hit)| matches!(hit, Hit::Decide(55, true)))
+                .any(|(_, hit)| matches!(hit, Hit::Decide(55, ApprovalDecision::Accept)))
         );
         assert!(
             panel
                 .hits
                 .iter()
-                .any(|(_, hit)| matches!(hit, Hit::Decide(55, false)))
+                .any(|(_, hit)| matches!(hit, Hit::Decide(55, ApprovalDecision::Decline)))
         );
         let panel = app.agent.as_mut().unwrap();
         panel.event(Event::ApprovalResolved(55));
@@ -1058,10 +1464,236 @@ mod tests {
         ));
         paint(&mut app);
         let panel = app.agent.as_ref().unwrap();
-        let before = panel.scroll;
-        assert!(before > 0.0);
         let area = panel.viewport;
         assert!(app.scroll_agent(area.x + 5.0, area.y + 5.0, -120.0));
-        assert!(app.agent.as_ref().unwrap().scroll < before);
+        assert!(
+            app.agent
+                .as_mut()
+                .unwrap()
+                .transcript()
+                .unwrap()
+                .anchor
+                .is_some()
+        );
+    }
+    const RICH: &str = "# 项目概览\n\n中英文 **mixed** with `inline code` and [src/main.rs:12](src/main.rs#L12).\n\n> 原生 Markdown 排版\n\n1. 读取文件\n2. Review changes\n\n| Category | Verification | Notes |\n| --- | --- | --- |\n| Markdown | 通过 | Progress and references |\n| Tool output | In progress | Folded by default |\n\n```rust\nfn main() { println!(\"你好\"); }\n```";
+
+    fn test_panel(size: usize) -> (App, TurnKey) {
+        let mut app = blank_app(false);
+        app.toggle_agent();
+        let panel = app.agent.as_mut().unwrap();
+        panel.opening = Some((1, false));
+        let key = TurnKey {
+            session: "sample".into(),
+            turn: "turn".into(),
+        };
+        panel.event(Event::SessionOpened(
+            1,
+            Session {
+                id: key.session.clone(),
+                cwd: PathBuf::new(),
+                title: "Winc · Agent transcript".into(),
+                model: None,
+                effort: None,
+            },
+            Vec::new(),
+            None,
+        ));
+        panel.connection = Connection::Ready;
+        panel.error = None;
+        for index in 0..size {
+            panel.event(Event::Delta(
+                key.clone(),
+                index.to_string(),
+                DeltaKind::Message,
+                format!("消息 {index} · reply with `code`."),
+            ));
+        }
+        (app, key)
+    }
+
+    #[test]
+    fn virtual_transcript_keeps_anchors_at_100_1000_and_10000_cards() {
+        for size in [100, 1000, 10_000] {
+            let (mut app, key) = test_panel(size);
+            paint(&mut app);
+            let panel = app.agent.as_mut().unwrap();
+            let chat = panel.transcript().unwrap();
+            assert_eq!(chat.cards.len(), size);
+            assert!(
+                chat.cards
+                    .iter()
+                    .filter(|card| card.layout.is_some())
+                    .count()
+                    < 40
+            );
+            panel.scroll_viewport(-210.0);
+            paint(&mut app);
+            let anchor = app
+                .agent
+                .as_mut()
+                .unwrap()
+                .transcript()
+                .unwrap()
+                .anchor
+                .unwrap();
+            let panel = app.agent.as_mut().unwrap();
+            panel.event(Event::Delta(
+                key,
+                "new".into(),
+                DeltaKind::Message,
+                RICH.into(),
+            ));
+            paint(&mut app);
+            let panel = app.agent.as_mut().unwrap();
+            let chat = panel.transcript().unwrap();
+            assert_eq!(chat.anchor, Some(anchor));
+            assert!(chat.unread);
+            for width in [280.0, 400.0, 600.0, 700.0] {
+                app.agent.as_mut().unwrap().width = width;
+                paint(&mut app);
+                let panel = app.agent.as_mut().unwrap();
+                assert_eq!(panel.transcript().unwrap().anchor.unwrap().0, anchor.0);
+            }
+            app.agent.as_mut().unwrap().transcript().unwrap().follow();
+            paint(&mut app);
+            let panel = app.agent.as_mut().unwrap();
+            assert!(!panel.transcript().unwrap().unread);
+            assert!(
+                panel
+                    .hits
+                    .iter()
+                    .any(|(_, hit)| matches!(hit, Hit::CopyCode(_)))
+            );
+        }
+    }
+
+    #[test]
+    fn agent_rich_snapshot_and_selection() {
+        let (mut app, key) = test_panel(0);
+        app.agent.as_mut().unwrap().event(Event::Delta(
+            key,
+            "rich".into(),
+            DeltaKind::Message,
+            RICH.into(),
+        ));
+        for width in [280.0, 400.0, 600.0, 700.0] {
+            app.agent.as_mut().unwrap().width = width;
+            let panel = app.agent.as_mut().unwrap();
+            panel.transcript().unwrap().anchor = Some((MAX_CARDS, 0.0));
+            if std::env::var_os("WINC_SNAPSHOT_DIR").is_some() {
+                crate::app::snapshot::shoot(&mut app, &format!("agent-{width}"));
+            } else {
+                paint(&mut app);
+            }
+            let panel = app.agent.as_mut().unwrap();
+            let text_hit = panel
+                .text_hits
+                .iter()
+                .find(|hit| hit.point.section == 0)
+                .unwrap();
+            let point = text_hit.point;
+            let point_next = TextPoint {
+                offset: point.offset + 2,
+                ..point
+            };
+            let card = panel.transcript().unwrap().cards.front().unwrap();
+            let selection = TextSelection {
+                card: MAX_CARDS,
+                anchor: point,
+                head: point_next,
+            };
+            assert_eq!(
+                card.layout.as_ref().unwrap().selected_text(selection),
+                "项目"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "Release performance measurement"]
+    fn agent_transcript_release_benchmark() {
+        fn rss() -> u64 {
+            let output = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse()
+                .unwrap_or_default()
+        }
+        fn cpu_seconds() -> f64 {
+            let output = std::process::Command::new("ps")
+                .args(["-o", "time=", "-p", &std::process::id().to_string()])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .split(':')
+                .fold(0.0, |elapsed, field| {
+                    elapsed * 60.0 + field.parse().unwrap_or(0.0)
+                })
+        }
+        fn median_ms(mut times: Vec<std::time::Duration>) -> f64 {
+            times.sort_unstable();
+            times[times.len() / 2].as_secs_f64() * 1000.0
+        }
+        let sizes = std::env::var("WINC_AGENT_BENCH_SIZE")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .map_or_else(|| vec![100, 1000, 10_000], |size| vec![size]);
+        for size in sizes {
+            let idle = rss();
+            let start = std::time::Instant::now();
+            let (mut app, key) = test_panel(size);
+            paint(&mut app);
+            let setup = start.elapsed().as_secs_f64() * 1000.0;
+            let visible_rss = rss();
+            let mut scroll = Vec::new();
+            let mut resize = Vec::new();
+            let mut stream = Vec::new();
+            for i in 0..60 {
+                let start = std::time::Instant::now();
+                app.agent.as_mut().unwrap().scroll_viewport(-32.0);
+                paint(&mut app);
+                scroll.push(start.elapsed());
+                let start = std::time::Instant::now();
+                app.agent.as_mut().unwrap().width = [280.0, 400.0, 600.0][i % 3];
+                paint(&mut app);
+                resize.push(start.elapsed());
+            }
+            app.agent.as_mut().unwrap().transcript().unwrap().follow();
+            let cpu_start = cpu_seconds();
+            let stream_start = std::time::Instant::now();
+            for _ in 0..60 {
+                let start = std::time::Instant::now();
+                app.agent.as_mut().unwrap().event(Event::Delta(
+                    key.clone(),
+                    "stream".into(),
+                    DeltaKind::Message,
+                    format!("{RICH}\n\n"),
+                ));
+                paint(&mut app);
+                stream.push(start.elapsed());
+            }
+            let cpu_ms = (cpu_seconds() - cpu_start) * 1000.0;
+            let stream_wall_ms = stream_start.elapsed().as_secs_f64() * 1000.0;
+            let retained = app
+                .agent
+                .as_mut()
+                .unwrap()
+                .transcript()
+                .unwrap()
+                .cards
+                .len();
+            println!(
+                "agent size={size} retained={retained} setup_ms={setup:.3} idle_kib={idle} visible_kib={visible_rss} scroll_ms={:.3} resize_ms={:.3} stream_ms={:.3} stream_cpu_ms={cpu_ms:.3} stream_wall_ms={stream_wall_ms:.3} end_kib={}",
+                median_ms(scroll),
+                median_ms(resize),
+                median_ms(stream),
+                rss()
+            );
+        }
     }
 }

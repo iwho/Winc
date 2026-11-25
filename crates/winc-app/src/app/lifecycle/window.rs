@@ -376,7 +376,6 @@ impl App {
         self.layout_agent();
         self.place_terminal();
         self.place_window_controls();
-        self.layout_agent_button();
         self.place_panes();
         self.place_editor_parts();
         // 依附于触发位置的浮层在终端、窗格都排好以后再放。

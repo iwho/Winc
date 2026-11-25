@@ -69,6 +69,7 @@ impl App {
                     self.global_changed(false);
                 }
                 Focus::Picker => self.picker_refresh(),
+                Focus::Agent => self.composer_changed(),
                 Focus::Setting => self.settings_live_font(),
                 Focus::LogFilter => self.log_filter_changed(),
                 Focus::TerminalFind => self.terminal_find_changed(),

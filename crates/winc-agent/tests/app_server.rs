@@ -51,7 +51,7 @@ fn handles_approval_and_interrupt_over_stdio() {
     wait(
         &mut provider,
         timeout,
-        |event| matches!(event, Event::SessionOpened(found, session, _) if found == id && session.id == "s"),
+        |event| matches!(event, Event::SessionOpened(found, session, _, _) if found == id && session.id == "s"),
     );
     provider
         .submit(Command::Send {
@@ -65,25 +65,47 @@ fn handles_approval_and_interrupt_over_stdio() {
     let mut running = None;
     let mut correlated = false;
     let mut approval = None;
+    let mut output = String::new();
+    let mut tools = Vec::new();
     wait(&mut provider, timeout, |event| {
         match event {
-            Event::Delta(_, _, _, text) => streamed.push_str(&text),
+            Event::Delta(_, id, winc_agent::DeltaKind::Output, text) if id == "read" => {
+                output.push_str(&text);
+            }
+            Event::Delta(_, _, winc_agent::DeltaKind::Message, text) => streamed.push_str(&text),
+            Event::Item(_, item, _) => tools.push(item.kind),
             Event::TurnStarted(Some(_), key) => {
                 running = Some(key);
                 correlated = true;
             }
             Event::Approval(request) => {
                 assert!(request.reviewable);
+                assert_eq!(
+                    request.decisions,
+                    [
+                        winc_agent::ApprovalDecision::Decline,
+                        winc_agent::ApprovalDecision::Cancel
+                    ]
+                );
                 approval = Some(request.id);
             }
             _ => {}
         }
         correlated && approval.is_some() && streamed == "你好"
     });
+    assert_eq!(output, "one\nthree\n");
+    assert_eq!(
+        tools,
+        [
+            winc_agent::ItemKind::Read,
+            winc_agent::ItemKind::Search,
+            winc_agent::ItemKind::Plan
+        ]
+    );
     provider
         .submit(Command::Approve {
             approval: approval.unwrap(),
-            accept: false,
+            decision: winc_agent::ApprovalDecision::Decline,
         })
         .unwrap();
     let mut file_approval = None;
@@ -100,10 +122,22 @@ fn handles_approval_and_interrupt_over_stdio() {
     provider
         .submit(Command::Approve {
             approval: file_approval.unwrap(),
-            accept: true,
+            decision: winc_agent::ApprovalDecision::Accept,
         })
         .unwrap();
-    provider.submit(Command::Stop(running.unwrap())).unwrap();
+    let turn = running.unwrap();
+    let steer = provider
+        .submit(Command::Steer {
+            turn: turn.clone(),
+            text: "Continue".into(),
+        })
+        .unwrap();
+    wait(
+        &mut provider,
+        timeout,
+        |event| matches!(event, Event::Steered(id, session) if id == steer && session == "s"),
+    );
+    provider.submit(Command::Stop(turn)).unwrap();
     wait(&mut provider, timeout, |event| {
         matches!(event, Event::TurnEnded(_, TurnStatus::Interrupted))
     });
@@ -115,9 +149,8 @@ fn handles_approval_and_interrupt_over_stdio() {
 #[ignore = "uses the locally signed-in Codex account and a real model turn"]
 fn live_codex_turn() {
     let root = std::env::temp_dir().join(format!("winc-agent-live-{}", std::process::id()));
-    std::fs::create_dir(&root).unwrap();
     let executable = std::env::var_os("WINC_CODEX_TEST_BIN").map(PathBuf::from);
-    let mut provider = CodexProvider::connect(root.clone(), executable, || {}).unwrap();
+    let mut provider = CodexProvider::connect_standalone(root.clone(), executable, || {}).unwrap();
     let timeout = Duration::from_secs(40);
     wait(&mut provider, timeout, |event| match event {
         Event::Ready { login_required } => {
@@ -143,7 +176,7 @@ fn live_codex_turn() {
     let mut session = None;
     let id = provider.submit(Command::NewSession).unwrap();
     wait(&mut provider, timeout, |event| match event {
-        Event::SessionOpened(found, opened, _) if id == found => {
+        Event::SessionOpened(found, opened, _, _) if id == found => {
             session = Some(opened.id);
             true
         }
@@ -190,7 +223,7 @@ fn live_codex_turn() {
     });
     let resume = provider.submit(Command::Resume(session.clone())).unwrap();
     wait(&mut provider, timeout, |event| match event {
-        Event::SessionOpened(id, restored, history) if id == resume => {
+        Event::SessionOpened(id, restored, history, _) if id == resume => {
             assert_eq!(restored.id, session);
             assert!(
                 history

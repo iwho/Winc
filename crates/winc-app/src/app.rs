@@ -644,7 +644,12 @@ impl Hover {
                         | terminal::HeaderHit::Hide
                         | terminal::HeaderHit::Run(_),
                 )
-                | Hover::Status(StatusItem::Terminal | StatusItem::Remote | StatusItem::Settings)
+                | Hover::Status(
+                    StatusItem::Terminal
+                        | StatusItem::Agent
+                        | StatusItem::Remote
+                        | StatusItem::Settings
+                )
                 | Hover::TreeMore
                 | Hover::SidebarButton
                 | Hover::Tab(..)
@@ -733,6 +738,7 @@ impl Hover {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Drag {
     None,
+    AgentText,
     AgentDivider {
         grab: f32,
     },

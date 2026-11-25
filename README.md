@@ -99,9 +99,11 @@ On macOS the app is started by the system, so it does not inherit the environmen
 winc builds with Rust 1.99.1; `rust-toolchain.toml` selects the toolchain automatically.
 
 ```bash
-cargo run --release                 # build and run
-cargo run --release -- <path>       # open a file or folder
+cargo build --locked --release -p winc -p winc-pty
+cargo run --locked --release -p winc -- <path>  # omit <path> to start with an empty window
 ```
+
+Keep the two executables together in `target/release` so Winc can launch the integrated terminal.
 
 For versioning, signing configuration and release workflows, see [Releasing winc](release/README.md).
 

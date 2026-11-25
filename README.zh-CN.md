@@ -95,9 +95,11 @@ Windows 安装包、Linux deb 包和 Arch 包会把 `winc` 加入 `PATH`；Windo
 需要 Rust 1.99.1，`rust-toolchain.toml` 会自动选用工具链。
 
 ```bash
-cargo run --release                 # 构建并运行
-cargo run --release -- <路径>        # 打开文件或目录
+cargo build --locked --release -p winc -p winc-pty
+cargo run --locked --release -p winc -- <路径>  # 省略路径可打开空窗口
 ```
+
+主程序和终端组件都在 `target/release`，请将两个可执行文件放在同一目录。
 
 版本同步、签名配置和发布流程见[发布说明](release/README.md)。
 

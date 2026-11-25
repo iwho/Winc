@@ -590,6 +590,11 @@ impl TextField {
         self.history.record(&self.text);
     }
 
+    /// Record a submitted value without changing the current draft.
+    pub fn remember_text(&mut self, text: &str) {
+        self.history.record(text);
+    }
+
     /// 是否正在翻阅输入历史（上一次修改文字来自 [`TextField::recall`]）。
     pub fn recalling(&self) -> bool {
         self.history.cursor.is_some()

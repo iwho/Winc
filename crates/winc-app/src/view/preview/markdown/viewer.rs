@@ -176,6 +176,7 @@ fn lay_diagram(
         cell: None,
         preedit: false,
         line_numbers: false,
+        code_header: 0.0,
         tall: f32::INFINITY,
         repeat: 0,
         toggles: HashMap::new(),

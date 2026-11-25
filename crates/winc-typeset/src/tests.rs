@@ -42,6 +42,7 @@ fn lay_with(markdown: &str, width: f32, images: &HashMap<PathBuf, ImageSlot>) ->
             cell: None,
             preedit: false,
             line_numbers: false,
+            code_header: 0.0,
             tall: f32::INFINITY,
             repeat: 0,
             toggles: HashMap::new(),

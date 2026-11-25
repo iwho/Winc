@@ -49,6 +49,13 @@ pub enum Command {
     NewSession,
     /// Load a saved session and its recent turns.
     Resume(String),
+    /// Load the next (older) page of turns in a resumed session.
+    Older {
+        /// Loaded session ID.
+        session: String,
+        /// Cursor provided by the App Server.
+        cursor: String,
+    },
     /// List historical sessions scoped to the project, with an optional page cursor.
     History(Option<String>),
     /// Discover models and supported reasoning efforts, with an optional page cursor.
@@ -64,14 +71,21 @@ pub enum Command {
         /// Reasoning effort from the selected model.
         effort: Option<String>,
     },
+    /// Add guidance to the identified active turn.
+    Steer {
+        /// Active turn precondition.
+        turn: TurnKey,
+        /// Guidance and optional editor context.
+        text: String,
+    },
     /// Interrupt a specific session's active turn.
     Stop(TurnKey),
     /// Answer one pending approval.
     Approve {
         /// Local handle to the server request.
         approval: u64,
-        /// Whether the user approved the displayed operation.
-        accept: bool,
+        /// Explicit user decision.
+        decision: ApprovalDecision,
     },
 }
 
@@ -153,6 +167,17 @@ pub struct Item {
     pub status: String,
     /// Paths explicitly reported by a file-change item.
     pub files: Vec<PathBuf>,
+    /// Complete line counts from the agent's patch, in file order.
+    pub file_stats: Vec<Option<LineChanges>>,
+}
+
+/// Counts for one agent-reported patch.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LineChanges {
+    /// Added lines.
+    pub added: usize,
+    /// Removed lines.
+    pub removed: usize,
 }
 
 /// Message or tool-card presentation.
@@ -164,6 +189,18 @@ pub enum ItemKind {
     Message,
     /// A shell command.
     Command,
+    /// A command reported as reading files.
+    Read,
+    /// A command reported as searching or listing files.
+    Search,
+    /// A test command recognized from its executable and arguments.
+    Test,
+    /// A sub-agent operation.
+    Subagent,
+    /// Current plan and step status.
+    Plan,
+    /// A turn failure reported by the server.
+    Error,
     /// A file change.
     FileChange,
     /// A provider tool call.
@@ -185,6 +222,36 @@ pub struct Approval {
     pub details: String,
     /// Whether the complete requested operation is available for review.
     pub reviewable: bool,
+    /// Decisions supported by the server for this request.
+    pub decisions: Vec<ApprovalDecision>,
+}
+
+/// Interactive Codex approval decisions handled by Winc.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalDecision {
+    /// Approve the displayed operation.
+    Accept,
+    /// Approve with session scope.
+    AcceptForSession,
+    /// Reject while allowing the turn to continue.
+    Decline,
+    /// Reject and interrupt the turn.
+    Cancel,
+}
+
+impl ApprovalDecision {
+    pub(crate) fn wire(self) -> &'static str {
+        match self {
+            Self::Accept => "accept",
+            Self::AcceptForSession => "acceptForSession",
+            Self::Decline => "decline",
+            Self::Cancel => "cancel",
+        }
+    }
+
+    pub(crate) fn grants(self) -> bool {
+        matches!(self, Self::Accept | Self::AcceptForSession)
+    }
 }
 
 /// Approval categories supported by the client.
@@ -203,6 +270,8 @@ pub enum ApprovalKind {
 pub enum DeltaKind {
     /// Markdown message body.
     Message,
+    /// Proposed plan text.
+    Plan,
     /// Tool output.
     Output,
 }
@@ -239,7 +308,9 @@ pub enum Event {
     /// An operation failed and may be retried by the caller.
     RequestFailed(u64, Failure),
     /// Response to a new or resumed session.
-    SessionOpened(u64, Session, Vec<Turn>),
+    SessionOpened(u64, Session, Vec<Turn>, Option<String>),
+    /// Older turns in chronological order and their next cursor.
+    Older(u64, String, Vec<Turn>, Option<String>),
     /// Response to a historical session listing.
     History(u64, Vec<Session>, Option<String>),
     /// Response to a model listing.
@@ -256,10 +327,16 @@ pub enum Event {
     Files(TurnKey, String, Vec<PathBuf>, String),
     /// A request is waiting for a user decision.
     Approval(Approval),
+    /// Approval waited past the local review deadline.
+    ApprovalExpired(u64),
+    /// A loaded session has a new title.
+    SessionTitle(String, Option<String>),
     /// An approval is no longer waiting for a decision.
     ApprovalResolved(u64),
+    /// Guidance accepted for the active turn.
+    Steered(u64, String),
     /// Successfully accepted an acknowledgement-only operation.
     Acknowledged(u64),
     /// Cumulative and most recent turn total token counts.
-    Tokens(TurnKey, u64, u64),
+    Tokens(TurnKey, u64, u64, Option<u64>),
 }

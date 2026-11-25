@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -11,6 +12,7 @@ pub(super) const MAX_MESSAGE: usize = 256 * 1024;
 pub(super) const MAX_OUTPUT: usize = 24 * 1024;
 const MAX_REVIEW: usize = 24 * 1024;
 const MAX_FILES: usize = 256;
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
 pub(super) fn append(text: &mut String, value: &str, limit: usize) {
     text.push_str(crate::prefix(value, limit.saturating_sub(text.len())));
@@ -65,12 +67,14 @@ fn model(value: &Value) -> Option<Model> {
     })
 }
 
-fn changes(value: &Value) -> (Vec<PathBuf>, String) {
+fn changes(value: &Value) -> (Vec<PathBuf>, String, Vec<Option<LineChanges>>) {
     let mut paths = Vec::new();
     let mut patch = String::new();
+    let mut stats = Vec::new();
     for change in array(value).iter().take(MAX_FILES) {
         if let Some(path) = change["path"].as_str() {
             paths.push(PathBuf::from(path));
+            stats.push(line_changes(change));
             append(&mut patch, path, MAX_OUTPUT);
             append(&mut patch, "\n", MAX_OUTPUT);
         }
@@ -81,7 +85,30 @@ fn changes(value: &Value) -> (Vec<PathBuf>, String) {
         );
         append(&mut patch, "\n", MAX_OUTPUT);
     }
-    (paths, patch)
+    (paths, patch, stats)
+}
+
+fn line_changes(change: &Value) -> Option<LineChanges> {
+    let patch = change["diff"].as_str()?;
+    let mut stat = LineChanges::default();
+    match change["kind"]["type"].as_str()? {
+        "add" => stat.added = patch.lines().count(),
+        "delete" => stat.removed = patch.lines().count(),
+        "update" => {
+            let mut in_hunk = false;
+            for line in patch.lines() {
+                match line.as_bytes().first() {
+                    Some(b'@') if line.starts_with("@@ ") => in_hunk = true,
+                    Some(b'+') if in_hunk => stat.added += 1,
+                    Some(b'-') if in_hunk => stat.removed += 1,
+                    Some(b' ' | b'\\') if in_hunk => {}
+                    _ => in_hunk = false,
+                }
+            }
+        }
+        _ => return None,
+    }
+    Some(stat)
 }
 
 fn item(value: &Value) -> Option<Item> {
@@ -89,6 +116,7 @@ fn item(value: &Value) -> Option<Item> {
     let mut text = String::new();
     let mut output = String::new();
     let mut files = Vec::new();
+    let mut file_stats = Vec::new();
     let kind = match value["type"].as_str()? {
         "userMessage" => {
             for part in array(&value["content"]) {
@@ -100,7 +128,11 @@ fn item(value: &Value) -> Option<Item> {
         }
         "agentMessage" | "plan" => {
             text = bounded(value["text"].as_str().unwrap_or_default(), MAX_MESSAGE);
-            ItemKind::Message
+            if value["type"] == "plan" {
+                ItemKind::Plan
+            } else {
+                ItemKind::Message
+            }
         }
         "commandExecution" => {
             text = bounded(value["command"].as_str().unwrap_or_default(), MAX_OUTPUT);
@@ -108,10 +140,14 @@ fn item(value: &Value) -> Option<Item> {
                 value["aggregatedOutput"].as_str().unwrap_or_default(),
                 MAX_OUTPUT,
             );
-            ItemKind::Command
+            command_kind(&value["commandActions"], &text)
         }
         "fileChange" => {
-            (files, output) = changes(&value["changes"]);
+            (files, output, file_stats) = changes(&value["changes"]);
+            for path in &files {
+                append(&mut text, &path.to_string_lossy(), MAX_OUTPUT);
+                append(&mut text, "\n", MAX_OUTPUT);
+            }
             ItemKind::FileChange
         }
         "mcpToolCall" | "dynamicToolCall" | "collabAgentToolCall" | "webSearch" => {
@@ -122,10 +158,29 @@ fn item(value: &Value) -> Option<Item> {
                     .unwrap_or_default(),
                 MAX_OUTPUT,
             );
-            if let Some(result) = value.get("result").filter(|v| !v.is_null()) {
-                output = bounded(&result.to_string(), MAX_OUTPUT);
+            if let Some(server) = value["server"].as_str() {
+                text = bounded(&format!("{server} / {text}"), MAX_OUTPUT);
             }
-            ItemKind::Tool
+            if let Some(result) = [
+                "error",
+                "result",
+                "agentsStates",
+                "agentStatuses",
+                "contentItems",
+            ]
+            .into_iter()
+            .find_map(|name| value.get(name).filter(|v| !v.is_null()))
+            {
+                output = bounded(
+                    &serde_json::to_string_pretty(result).unwrap_or_default(),
+                    MAX_OUTPUT,
+                );
+            }
+            if value["type"] == "collabAgentToolCall" {
+                ItemKind::Subagent
+            } else {
+                ItemKind::Tool
+            }
         }
         _ => return None,
     };
@@ -136,7 +191,28 @@ fn item(value: &Value) -> Option<Item> {
         output,
         status: bounded(value["status"].as_str().unwrap_or_default(), 64),
         files,
+        file_stats,
     })
+}
+
+fn command_kind(actions: &Value, command: &str) -> ItemKind {
+    let actions = array(actions);
+    if !actions.is_empty() && actions.iter().all(|action| action["type"] == "read") {
+        return ItemKind::Read;
+    }
+    if !actions.is_empty()
+        && actions
+            .iter()
+            .all(|action| matches!(action["type"].as_str(), Some("search" | "listFiles")))
+    {
+        return ItemKind::Search;
+    }
+    let mut words = command.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some("cargo" | "go" | "npm" | "pnpm" | "yarn" | "mvn"), Some("test"))
+        | (Some("pytest" | "vitest" | "jest"), _) => ItemKind::Test,
+        _ => ItemKind::Command,
+    }
 }
 
 fn turn(session: &str, value: &Value) -> Option<Turn> {
@@ -157,6 +233,16 @@ fn turn(session: &str, value: &Value) -> Option<Turn> {
     })
 }
 
+fn turns_page(session: &str, result: &Value) -> Option<(Vec<Turn>, Option<String>)> {
+    let turns = result["data"]
+        .as_array()?
+        .iter()
+        .rev()
+        .filter_map(|value| turn(session, value))
+        .collect();
+    Some((turns, string(&result["nextCursor"])))
+}
+
 #[derive(Debug)]
 pub(super) enum Reply {
     Initialize,
@@ -165,18 +251,22 @@ pub(super) enum Reply {
     VerifySession(String),
     Resume,
     Recent(Session),
+    Older(String),
     History,
     Models,
     Send(String),
+    Steer(TurnKey),
     Stop,
 }
 
 struct PendingApproval {
     wire_id: Value,
+    expires: Instant,
     turn: TurnKey,
     kind: ApprovalKind,
     permissions: Value,
     reviewable: bool,
+    decisions: Vec<ApprovalDecision>,
     file: Option<(String, String, String)>,
 }
 
@@ -206,6 +296,11 @@ impl Protocol {
                 json!({"threadId": session, "includeTurns": false}),
                 Reply::VerifySession(session),
             ),
+            Command::Older { session, cursor } if self.loaded.contains(&session) => (
+                "thread/turns/list",
+                json!({"threadId": session, "cursor": cursor, "limit": 16, "sortDirection": "desc", "itemsView": "full"}),
+                Reply::Older(session),
+            ),
             Command::History(cursor) => (
                 "thread/list",
                 json!({"cwd": root, "limit": 25, "cursor": cursor}),
@@ -231,30 +326,46 @@ impl Protocol {
                 }),
                 Reply::Send(session),
             ),
+            Command::Steer { turn, text } if self.loaded.contains(&turn.session) => (
+                "turn/steer",
+                json!({
+                    "threadId": turn.session, "expectedTurnId": turn.turn,
+                    "input": [{"type": "text", "text": text, "text_elements": []}],
+                }),
+                Reply::Steer(turn),
+            ),
             Command::Stop(turn) if self.loaded.contains(&turn.session) => (
                 "turn/interrupt",
                 json!({"threadId": turn.session, "turnId": turn.turn}),
                 Reply::Stop,
             ),
-            Command::Approve { approval, accept } => {
+            Command::Approve { approval, decision } => {
                 let pending = self
                     .approvals
                     .get(&approval)
                     .ok_or(Failure::Rejected(-32602))?;
-                if accept && !pending.reviewable {
+                if Instant::now() >= pending.expires
+                    || !pending.decisions.contains(&decision)
+                    || decision.grants() && !pending.reviewable
+                {
                     return Err(Failure::Rejected(-32602));
                 }
                 let answer = match pending.kind {
                     ApprovalKind::Command | ApprovalKind::Files => {
-                        json!({"decision": if accept {"accept"} else {"decline"}})
+                        json!({"decision": decision.wire()})
                     }
                     ApprovalKind::Permissions => {
-                        let permissions = if accept {
+                        let permissions = if decision.grants() {
                             pending.permissions.clone()
                         } else {
                             json!({})
                         };
-                        json!({"permissions": permissions, "scope": "turn"})
+                        let scope = if decision == ApprovalDecision::AcceptForSession {
+                            "session"
+                        } else {
+                            "turn"
+                        };
+                        json!({"permissions": permissions, "scope": scope})
                     }
                 };
                 return Ok((json!({"id": pending.wire_id, "result": answer}), None));
@@ -278,15 +389,15 @@ impl Protocol {
             },
             Reply::Session => {
                 let session = self.opened(result, root)?;
-                Event::SessionOpened(id, session, Vec::new())
+                Event::SessionOpened(id, session, Vec::new(), None)
             }
             Reply::Recent(session) => {
-                let turns = array(&result["data"])
-                    .iter()
-                    .rev()
-                    .filter_map(|value| turn(&session.id, value))
-                    .collect();
-                Event::SessionOpened(id, session, turns)
+                let (turns, next) = turns_page(&session.id, result)?;
+                Event::SessionOpened(id, session, turns, next)
+            }
+            Reply::Older(session) => {
+                let (turns, next) = turns_page(&session, result)?;
+                Event::Older(id, session, turns, next)
             }
             Reply::VerifySession(_) | Reply::Resume => return None,
             Reply::History => {
@@ -305,6 +416,12 @@ impl Protocol {
             Reply::Send(session) => {
                 let turn = turn(&session, &result["turn"])?;
                 Event::TurnStarted(Some(id), turn.key)
+            }
+            Reply::Steer(turn) => {
+                if result["turnId"].as_str() != Some(&turn.turn) {
+                    return None;
+                }
+                Event::Steered(id, turn.session)
             }
             Reply::Stop => Event::Acknowledged(id),
         })
@@ -360,6 +477,12 @@ impl Protocol {
         // Notifications may precede a start/resume response. Session IDs are still
         // carried on every event, and the editor only displays its loaded sessions.
         let event = match method {
+            "thread/name/updated" => Event::SessionTitle(
+                session.to_owned(),
+                params["threadName"]
+                    .as_str()
+                    .map(|name| bounded(name, 1024)),
+            ),
             "turn/started" | "turn/completed" => {
                 let Some(turn) = turn(session, &params["turn"]) else {
                     return;
@@ -376,6 +499,21 @@ impl Protocol {
                             true
                         }
                     });
+                    if let Some(message) = params["turn"]["error"]["message"].as_str() {
+                        events.push(Event::Item(
+                            turn.key.clone(),
+                            Item {
+                                id: "\0turn-error".into(),
+                                kind: ItemKind::Error,
+                                text: bounded(message, MAX_OUTPUT),
+                                output: String::new(),
+                                status: "failed".into(),
+                                files: Vec::new(),
+                                file_stats: Vec::new(),
+                            },
+                            true,
+                        ));
+                    }
                     Event::TurnEnded(turn.key, turn.status)
                 }
             }
@@ -398,9 +536,65 @@ impl Protocol {
                 let (Some(key), Some(id)) = (key(params), string(&params["itemId"])) else {
                     return;
                 };
-                let (files, patch) = changes(&params["changes"]);
+                let (files, patch, _) = changes(&params["changes"]);
                 self.remember_file_review(&key, &id, &params["changes"], &patch, events);
                 Event::Files(key, id, files, patch)
+            }
+            "turn/plan/updated" => {
+                let Some(turn) = key(params) else { return };
+                let mut text = bounded(
+                    params["explanation"].as_str().unwrap_or_default(),
+                    MAX_OUTPUT,
+                );
+                for step in array(&params["plan"]) {
+                    let marker = match step["status"].as_str() {
+                        Some("completed") => "✓ ",
+                        Some("inProgress") => "▸ ",
+                        _ => "○ ",
+                    };
+                    if let Some(step) = step["step"].as_str() {
+                        if !text.is_empty() {
+                            append(&mut text, "\n", MAX_OUTPUT);
+                        }
+                        append(&mut text, marker, MAX_OUTPUT);
+                        append(&mut text, step, MAX_OUTPUT);
+                    }
+                }
+                Event::Item(
+                    turn,
+                    Item {
+                        id: "\0turn-plan".into(),
+                        kind: ItemKind::Plan,
+                        text,
+                        output: String::new(),
+                        status: String::new(),
+                        files: Vec::new(),
+                        file_stats: Vec::new(),
+                    },
+                    false,
+                )
+            }
+            "item/mcpToolCall/progress" => {
+                let (Some(turn), Some(id), Some(message)) = (
+                    key(params),
+                    string(&params["itemId"]),
+                    params["message"].as_str(),
+                ) else {
+                    return;
+                };
+                let mut output = bounded(message, MAX_OUTPUT);
+                append(&mut output, "\n", MAX_OUTPUT);
+                Event::Delta(turn, id, DeltaKind::Output, output)
+            }
+            "item/plan/delta" => {
+                let (Some(turn), Some(id), Some(delta)) = (
+                    key(params),
+                    string(&params["itemId"]),
+                    params["delta"].as_str(),
+                ) else {
+                    return;
+                };
+                Event::Delta(turn, id, DeltaKind::Plan, bounded(delta, MAX_MESSAGE))
             }
             "item/agentMessage/delta"
             | "item/commandExecution/outputDelta"
@@ -435,6 +629,7 @@ impl Protocol {
                     key,
                     usage["total"]["totalTokens"].as_u64().unwrap_or_default(),
                     usage["last"]["totalTokens"].as_u64().unwrap_or_default(),
+                    usage["modelContextWindow"].as_u64(),
                 )
             }
             _ => return,
@@ -477,6 +672,7 @@ impl Protocol {
                 kind: ApprovalKind::Files,
                 details,
                 reviewable,
+                decisions: pending.decisions.clone(),
             }));
         }
     }
@@ -518,6 +714,7 @@ impl Protocol {
                     "cwd": params["cwd"],
                     "networkApprovalContext": params["networkApprovalContext"],
                     "reason": params["reason"],
+                    "additionalPermissions": params["additionalPermissions"],
                 });
                 let reviewable =
                     params["command"].is_string() || params["networkApprovalContext"].is_object();
@@ -538,14 +735,36 @@ impl Protocol {
             ),
         };
         let reviewable = reviewable && details.len() <= MAX_REVIEW;
+        use ApprovalDecision::{Accept, AcceptForSession, Cancel, Decline};
+        let decisions = match (kind, params["availableDecisions"].as_array()) {
+            (ApprovalKind::Command, Some(values)) => values
+                .iter()
+                .filter_map(|value| {
+                    [Accept, AcceptForSession, Decline, Cancel]
+                        .into_iter()
+                        .find(|decision| value.as_str() == Some(decision.wire()))
+                })
+                .collect::<Vec<_>>(),
+            (ApprovalKind::Permissions, _) => vec![Accept, AcceptForSession, Decline],
+            _ => vec![Accept, AcceptForSession, Decline, Cancel],
+        };
+        if decisions.is_empty()
+            || !reviewable && !decisions.iter().any(|decision| !decision.grants())
+        {
+            return Some(
+                json!({"id": id, "error": {"code": -32602, "message": "Approval cannot be reviewed"}}),
+            );
+        }
         self.approvals.insert(
             local_id,
             PendingApproval {
                 wire_id: id,
+                expires: Instant::now() + APPROVAL_TIMEOUT,
                 turn: turn.clone(),
                 kind,
                 permissions: permission.clone(),
                 reviewable,
+                decisions: decisions.clone(),
                 file: if kind == ApprovalKind::Files {
                     let root = params["grantRoot"].as_str().unwrap_or_default();
                     let reason = params["reason"].as_str().unwrap_or_default();
@@ -563,8 +782,25 @@ impl Protocol {
             kind,
             details: bounded(&details, MAX_REVIEW),
             reviewable,
+            decisions,
         }));
         None
+    }
+
+    pub(super) fn expire_approvals(&mut self, now: Instant, events: &mut Vec<Event>) -> Vec<Value> {
+        let mut replies = Vec::new();
+        self.approvals.retain(|id, pending| {
+            if now < pending.expires {
+                return true;
+            }
+            replies.push(json!({
+                "id": pending.wire_id,
+                "error": {"code": -32000, "message": "Winc approval expired"},
+            }));
+            events.push(Event::ApprovalExpired(*id));
+            false
+        });
+        replies
     }
 
     pub(super) fn remove_approval(&mut self, id: u64) {
@@ -598,4 +834,96 @@ fn same_root(a: &Path, b: &Path) -> bool {
 
 pub(super) fn request(id: u64, method: &str, params: Value) -> Value {
     json!({"id": id, "method": method, "params": params})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expired_approvals_invalidate_the_original_wire_request() {
+        let mut protocol = Protocol::default();
+        protocol.loaded.insert("thread".into());
+        let mut events = Vec::new();
+        let params = json!({
+            "threadId": "thread", "turnId": "turn", "itemId": "command", "command": "echo example",
+        });
+        assert!(
+            protocol
+                .server_request(
+                    1,
+                    json!("server-id"),
+                    "item/commandExecution/requestApproval",
+                    &params,
+                    &mut events,
+                )
+                .is_none()
+        );
+        let replies = protocol.expire_approvals(Instant::now() + APPROVAL_TIMEOUT, &mut events);
+        assert_eq!(replies[0]["id"], "server-id");
+        assert!(replies[0].get("result").is_none());
+        assert!(matches!(events.last(), Some(Event::ApprovalExpired(1))));
+        assert!(
+            protocol
+                .command(
+                    2,
+                    Command::Approve {
+                        approval: 1,
+                        decision: ApprovalDecision::Accept,
+                    },
+                    Path::new("/project")
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn failed_turn_keeps_the_diagnostic_and_resolves_pending_review() {
+        let mut protocol = Protocol::default();
+        protocol.loaded.insert("thread".into());
+        let mut events = Vec::new();
+        let approval = json!({
+            "threadId": "thread", "turnId": "turn", "itemId": "command", "command": "echo example",
+        });
+        protocol.server_request(
+            1,
+            json!(7),
+            "item/commandExecution/requestApproval",
+            &approval,
+            &mut events,
+        );
+        events.clear();
+        protocol.notification("turn/completed", &json!({
+            "threadId": "thread",
+            "turn": {"id":"turn", "status":"failed", "error":{"message":"tool connection lost"}, "items":[]},
+        }), &mut events);
+        assert!(matches!(events.as_slice(), [
+            Event::ApprovalResolved(1),
+            Event::Item(_, item, true),
+            Event::TurnEnded(_, TurnStatus::Failed),
+        ] if item.kind == ItemKind::Error && item.text == "tool connection lost"));
+    }
+
+    #[test]
+    fn line_counts_read_the_agent_patch_and_ignore_its_headers() {
+        let change = json!({
+            "path": "src/lib.rs", "kind": {"type": "update"},
+            "diff": "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1,2 +1,3 @@\n-old\n+new\n+++ prefix\n context\n\nMoved to: src/main.rs",
+        });
+        assert_eq!(
+            line_changes(&change),
+            Some(LineChanges {
+                added: 2,
+                removed: 1
+            })
+        );
+        let change = json!({"path":"new.txt","kind":{"type":"add"},"diff":"one\ntwo\n"});
+        assert_eq!(
+            line_changes(&change),
+            Some(LineChanges {
+                added: 2,
+                removed: 0
+            })
+        );
+    }
 }

@@ -98,13 +98,6 @@ impl Link {
         let path = PathBuf::from(decoded.trim_end_matches('.'));
         (!path.as_os_str().is_empty()).then_some(Self { path, line, column })
     }
-
-    pub(crate) fn label(&self) -> String {
-        match self.line {
-            Some(line) => format!("{}:{}", self.path.display(), line + 1),
-            None => self.path.display().to_string(),
-        }
-    }
 }
 
 fn project_path(root: &Path, path: &Path) -> Option<PathBuf> {
@@ -145,16 +138,33 @@ fn attachment(doc: &winc_editor::Document, root: &Path, selection: bool) -> Opti
     })
 }
 
+#[derive(Default)]
+pub(crate) struct Change {
+    pub(crate) reported: bool,
+    pub(crate) stat: Option<LineChanges>,
+}
+
 impl Conversation {
-    pub(super) fn note_change(&mut self, turn: &TurnKey, path: PathBuf, reported: bool) {
+    pub(super) fn note_change(
+        &mut self,
+        turn: &TurnKey,
+        path: PathBuf,
+        reported: bool,
+        stat: Option<LineChanges>,
+    ) {
         if self.change_turn.as_ref() != Some(turn) {
             self.change_turn = Some(turn.clone());
             self.changes.clear();
         }
         if let Some(current) = self.changes.get_mut(&path) {
-            *current |= reported;
+            current.reported |= reported;
+            if let Some(stat) = stat {
+                let total = current.stat.get_or_insert_default();
+                total.added += stat.added;
+                total.removed += stat.removed;
+            }
         } else if self.changes.len() < MAX_CHANGES {
-            self.changes.insert(path, reported);
+            self.changes.insert(path, Change { reported, stat });
         }
     }
 }
@@ -204,7 +214,7 @@ impl App {
                         .strip_prefix(root)
                         .is_ok_and(|name| !name.starts_with(".git"))
                     {
-                        session.note_change(&turn, path.clone(), false);
+                        session.note_change(&turn, path.clone(), false, None);
                     }
                 }
             }
@@ -269,6 +279,19 @@ fn secure_path(path: PathBuf) -> Option<PathBuf> {
         return None;
     }
     Some(parent.join(path.file_name()?))
+}
+
+pub(super) fn reported_changes(root: &Path, item: &Item) -> Vec<(PathBuf, Option<LineChanges>)> {
+    item.files
+        .iter()
+        .enumerate()
+        .filter_map(|(i, path)| {
+            Some((
+                project_path(root, path)?,
+                item.file_stats.get(i).copied().flatten(),
+            ))
+        })
+        .collect()
 }
 
 pub(super) fn reported_files(root: Option<&Path>, files: &[PathBuf]) -> Vec<PathBuf> {

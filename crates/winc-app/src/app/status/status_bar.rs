@@ -30,6 +30,8 @@ pub enum StatusItem {
     Branch,
     /// 终端面板的开关（终端模块开着时在设置按钮左边）。
     Terminal,
+    /// Codex sidebar toggle.
+    Agent,
     /// 连接远端主机的按钮（远程模块开着时在终端开关左边）：点击打开主机面板。
     Remote,
     /// 设置按钮（始终在最右边）：点击打开设置。
@@ -56,6 +58,9 @@ impl App {
     /// 分支名弹出的是提交视图里同一个分支选择器（往上展开），不另做一套菜单：切换、新建、同步都
     /// 在一处。
     pub(in crate::app) fn open_status_menu(&mut self, item: StatusItem) {
+        if item == StatusItem::Agent {
+            return self.toggle_agent();
+        }
         if item == StatusItem::Terminal {
             return self.click_terminal_button();
         }
@@ -90,6 +95,7 @@ impl App {
             (StatusItem::ReadOnly, Some(id)) => MenuTarget::ReadOnly(id),
             (
                 StatusItem::Branch
+                | StatusItem::Agent
                 | StatusItem::Terminal
                 | StatusItem::Remote
                 | StatusItem::Settings

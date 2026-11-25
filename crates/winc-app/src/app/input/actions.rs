@@ -45,7 +45,11 @@ impl App {
         ) && matches!(action, Copy | Cut | Paste | SelectAll | Undo | Redo)
         {
             match action {
-                Copy => self.copy_field(false),
+                Copy => {
+                    if self.focus != Focus::Agent || !self.copy_agent_text() {
+                        self.copy_field(false);
+                    }
+                }
                 Cut => self.copy_field(true),
                 Paste => self.paste(),
                 SelectAll => self.edit_field(|field| {

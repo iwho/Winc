@@ -931,6 +931,13 @@ pub(in crate::view) fn tooltip(app: &App) -> Option<(Rect, String)> {
             };
             Some((rect, label))
         }
+        Hover::Status(item @ crate::app::StatusItem::Agent) => {
+            let rect = app.hits.status.iter().find(|(_, i)| *i == item)?.0;
+            Some((
+                rect,
+                with_key(t!("cmd-toggle-agent"), Some(Action::ToggleAgent)),
+            ))
+        }
         Hover::Status(item @ crate::app::StatusItem::Terminal) => {
             let rect = app.hits.status.iter().find(|(_, i)| *i == item)?.0;
             let label = if app.terminal.open {

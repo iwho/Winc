@@ -475,6 +475,7 @@ pub(crate) fn lay_out(
         cell: None,
         preedit: false,
         line_numbers: key.numbers,
+        code_header: 0.0,
         tall: key.tall,
         repeat: 0,
         toggles: HashMap::new(),

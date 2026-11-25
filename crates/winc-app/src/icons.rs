@@ -1029,6 +1029,33 @@ pub fn terminal(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip:
     frame.stroke(shapes.as_slice(), STROKE, color, clip);
 }
 
+/// Codex chat bubble with a four-point mark, sized for the status bar.
+pub fn codex(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip: Rect) {
+    let outline = rounded_outline(cx - 7.0, cy - 6.5, 14.0, 11.0, 3.5);
+    frame.stroke(&outline, 1.25, color, clip);
+    frame.stroke(
+        &[Stroke::Line(cx - 3.5, cy + 4.5, cx - 5.5, cy + 6.5)],
+        1.25,
+        color,
+        clip,
+    );
+    let y = cy - 1.0;
+    frame.polygon(
+        &[
+            (cx, y - 3.3),
+            (cx + 0.9, y - 0.9),
+            (cx + 3.3, y),
+            (cx + 0.9, y + 0.9),
+            (cx, y + 3.3),
+            (cx - 0.9, y + 0.9),
+            (cx - 3.3, y),
+            (cx - 0.9, y - 0.9),
+        ],
+        color,
+        clip,
+    );
+}
+
 /// 绘制连接远端主机的图标：与终端图标同宽的上下两个圆角机箱，各有一道短线表示指示灯。
 ///
 /// 用于状态栏，位于终端图标的左边，线宽和外框的尺寸与它一致。

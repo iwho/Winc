@@ -238,7 +238,7 @@ fn tree_row_center(app: &App, index: usize) -> (f32, f32) {
 /// 绘制一帧并保存为 `{name}.png`，并将文件路径输出到标准错误。
 ///
 /// 目录取环境变量 `WINC_SNAPSHOT_DIR`；未设置时使用系统临时目录下的 `winc-snapshots`。
-fn shoot(app: &mut App, name: &str) {
+pub(super) fn shoot(app: &mut App, name: &str) {
     paint(app);
     let renderer = app.frame.renderer.take().unwrap();
 

@@ -67,7 +67,6 @@ impl App {
         let l = &self.layout;
         let mut client = vec![
             l.sidebar_button,
-            self.agent_rects().button,
             l.terminal_divider,
             l.split_divider,
             l.search,
@@ -145,9 +144,6 @@ impl App {
     ) -> Option<crate::app::input::touch::WindowTouch> {
         use crate::app::input::touch::WindowTouch;
         if self.touch_intercepted() || self.settings.open {
-            return None;
-        }
-        if self.agent_rects().button.contains(x, y) {
             return None;
         }
         match self.target_at(x, y) {

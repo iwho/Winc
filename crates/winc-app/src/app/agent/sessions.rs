@@ -79,8 +79,16 @@ impl Panel {
     }
 
     pub(crate) fn token_label(&self) -> Option<String> {
-        let (total, last) = self.current()?.tokens;
-        (total > 0).then(|| t!("agent-tokens", total = total as f64, last = last as f64))
+        let (total, last, window) = self.current()?.tokens;
+        (total > 0).then(|| match window {
+            Some(window) => t!(
+                "agent-tokens-window",
+                total = total as f64,
+                last = last as f64,
+                window = window as f64
+            ),
+            None => t!("agent-tokens", total = total as f64, last = last as f64),
+        })
     }
 
     pub(crate) fn writer_count(&self) -> usize {
@@ -210,6 +218,16 @@ impl Panel {
         self.show_tab(Tab::Chat);
     }
 
+    pub(super) fn title_received(&mut self, id: &str, title: Option<String>) {
+        let title = title.unwrap_or_default();
+        if let Some(session) = self.conversations.get_mut(id) {
+            session.session.title.clone_from(&title);
+        }
+        if let Some(entry) = self.catalog.history.iter_mut().find(|entry| entry.id == id) {
+            entry.title = title;
+        }
+    }
+
     pub(super) fn remember_session(&mut self, session: &Session) {
         if let Some(i) = self
             .catalog
@@ -228,6 +246,7 @@ impl Panel {
 
     pub(super) fn select(&mut self, id: String) {
         if self.selected.as_ref() != Some(&id) {
+            let had_selection = self.selected.is_some();
             if let Some(old) = self.selected.take()
                 && let Some(session) = self.conversations.get_mut(&old)
             {
@@ -235,8 +254,9 @@ impl Panel {
                 session.attachment = self.attachment.take();
             }
             if let Some(session) = self.conversations.get_mut(&id) {
-                if !session.draft.text().is_empty() {
-                    self.field = std::mem::replace(&mut session.draft, TextField::multiline());
+                // The first submitted prompt starts in the unattached composer.
+                if had_selection || self.field.text().is_empty() {
+                    std::mem::swap(&mut self.field, &mut session.draft);
                 }
                 if session.attachment.is_some() {
                     self.attachment = session.attachment.take();
@@ -249,8 +269,9 @@ impl Panel {
 
     pub(super) fn show_tab(&mut self, tab: Tab) {
         self.tab = tab;
+        self.selection = None;
+        self.completion = composer::Completion::default();
         self.scroll = 0.0;
-        self.follow = tab == Tab::Chat;
     }
 }
 
@@ -280,6 +301,7 @@ mod tests {
         panel.field.set_text("first prompt");
         panel.current_mut().unwrap().send_request = Some(Submission {
             id: 9,
+            steer: false,
             text: "first prompt".into(),
             attachment: None,
         });

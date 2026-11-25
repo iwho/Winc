@@ -114,6 +114,13 @@ impl App {
             return;
         }
         // 链接地址的补全列表开着时，选择、写入和关掉列表的键先给它。
+        if self.focus == Focus::Agent
+            && self.ime.field_preedit.is_empty()
+            && !cmd
+            && self.agent_completion_key(&event.logical_key)
+        {
+            return;
+        }
         if self.suggest_key(&event.logical_key) {
             return;
         }
@@ -171,10 +178,10 @@ impl App {
                 if event.logical_key == Key::Named(NamedKey::Enter)
                     && self.ime.field_preedit.is_empty() =>
             {
-                if cmd {
-                    self.agent_send();
-                } else {
+                if self.pointer.modifiers.shift_key() {
                     self.edit_field(|field| field.insert("\n"));
+                } else {
+                    self.agent_send();
                 }
             }
             Focus::Agent
@@ -182,6 +189,40 @@ impl App {
                     && self.ime.field_preedit.is_empty() =>
             {
                 self.toggle_agent()
+            }
+            Focus::Agent
+                if self.ime.field_preedit.is_empty()
+                    && matches!(
+                        event.logical_key,
+                        Key::Named(NamedKey::PageUp | NamedKey::PageDown)
+                    ) =>
+            {
+                if let Some(panel) = &mut self.agent {
+                    let direction = if event.logical_key == Key::Named(NamedKey::PageUp) {
+                        -1.0
+                    } else {
+                        1.0
+                    };
+                    panel.scroll_viewport(direction * (panel.viewport.h - 24.0).max(24.0));
+                    self.request_redraw();
+                }
+            }
+            Focus::Agent
+                if self.ime.field_preedit.is_empty()
+                    && self.pointer.modifiers.alt_key()
+                    && matches!(
+                        event.logical_key,
+                        Key::Named(NamedKey::ArrowUp | NamedKey::ArrowDown)
+                    ) =>
+            {
+                self.edit_field(|field| {
+                    field.recall(event.logical_key == Key::Named(NamedKey::ArrowUp))
+                });
+            }
+            Focus::Agent if cmd && base == "c" => {
+                if !self.copy_agent_text() {
+                    self.on_key_field(event, &base, cmd);
+                }
             }
             Focus::Agent if cmd && base == "v" => self.paste(),
             Focus::Agent => self.on_key_field(event, &base, cmd),

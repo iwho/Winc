@@ -45,6 +45,27 @@ impl CodexProvider {
         executable: Option<PathBuf>,
         wake: impl Fn() + Send + 'static,
     ) -> io::Result<Self> {
+        Self::connect_in(root, false, executable, wake)
+    }
+
+    /// Starts Codex in Winc's dedicated directory for chats without a workspace.
+    /// The directory is prepared on the supervisor thread.
+    /// # Errors
+    /// The supervisor thread could not be created.
+    pub fn connect_standalone(
+        root: PathBuf,
+        executable: Option<PathBuf>,
+        wake: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
+        Self::connect_in(root, true, executable, wake)
+    }
+
+    fn connect_in(
+        root: PathBuf,
+        standalone: bool,
+        executable: Option<PathBuf>,
+        wake: impl Fn() + Send + 'static,
+    ) -> io::Result<Self> {
         let (commands, jobs) = mpsc::sync_channel(32);
         let (out, events) = mpsc::sync_channel(4);
         let wake_pending = Arc::new(AtomicBool::new(false));
@@ -72,9 +93,14 @@ impl CodexProvider {
                     }
                     Ok(())
                 };
-                if let Err(failure) =
-                    supervise(&root, executable, jobs, &process_shutdown, &publish)
-                {
+                if let Err(failure) = supervise(
+                    &root,
+                    standalone,
+                    executable,
+                    jobs,
+                    &process_shutdown,
+                    &publish,
+                ) {
                     let _ = publish(vec![Event::Disconnected(failure)]);
                 }
             })?;
@@ -96,7 +122,8 @@ impl Drop for CodexProvider {
 
 impl AgentProvider for CodexProvider {
     fn submit(&mut self, command: Command) -> Result<u64, SubmitError> {
-        if matches!(&command, Command::Send { text, .. } if text.len() > MAX_PROMPT) {
+        if matches!(&command, Command::Send { text, .. } | Command::Steer { text, .. } if text.len() > MAX_PROMPT)
+        {
             return Err(SubmitError::PromptTooLarge);
         }
         let id = self.next_id;
@@ -128,16 +155,22 @@ impl Drop for ProcessGuard<'_> {
 
 fn supervise(
     root: &Path,
+    standalone: bool,
     executable: Option<PathBuf>,
     jobs: Receiver<Job>,
     shutdown: &Shutdown,
     publish: &impl Fn(Vec<Event>) -> Result<(), ()>,
 ) -> Result<(), Failure> {
-    let root = winc_config::files::canonicalize(root).map_err(|_| Failure::Workspace)?;
+    let executable = codex_path(executable)?;
+    let root = if standalone {
+        standalone_directory(root)?
+    } else {
+        winc_config::files::canonicalize(root).map_err(|_| Failure::Workspace)?
+    };
     if root.to_str().is_none() || !root.is_dir() {
         return Err(Failure::Workspace);
     }
-    let mut process = Process::new(codex_path(executable)?);
+    let mut process = Process::new(executable);
     process
         .arg("app-server")
         .current_dir(&root)
@@ -272,6 +305,29 @@ fn supervise(
         }
     }
     result
+}
+
+fn standalone_directory(root: &Path) -> Result<PathBuf, Failure> {
+    let parent = root.parent().ok_or(Failure::Workspace)?;
+    std::fs::create_dir_all(parent).map_err(|_| Failure::Workspace)?;
+    let parent = winc_config::files::canonicalize(parent).map_err(|_| Failure::Workspace)?;
+    let root = parent.join(root.file_name().ok_or(Failure::Workspace)?);
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    match builder.create(&root) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(Failure::Workspace),
+    }
+    let resolved = winc_config::files::canonicalize(&root).map_err(|_| Failure::Workspace)?;
+    if resolved != root || !resolved.is_dir() {
+        return Err(Failure::Workspace);
+    }
+    Ok(resolved)
 }
 
 fn codex_path(configured: Option<PathBuf>) -> Result<PathBuf, Failure> {
@@ -449,6 +505,9 @@ impl<'a> Client<'a> {
 
     fn expire(&mut self, events: &mut Vec<Event>) -> Result<(), Failure> {
         let now = Instant::now();
+        for response in self.protocol.expire_approvals(now, events) {
+            self.write(response)?;
+        }
         let mut fatal = false;
         self.requests.retain(|&id, (deadline, reply)| {
             if now < *deadline {

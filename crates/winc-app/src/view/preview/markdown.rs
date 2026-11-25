@@ -1409,7 +1409,13 @@ pub(crate) fn copy_button(code: Rect) -> Rect {
 }
 
 /// 任务列表的勾选框（逻辑像素）：选中时填强调色并画对勾，未选中时只画一个细边框。
-fn draw_check(frame: &mut Frame<'_>, p: &Palette, r: Rect, checked: bool, clip: Rect) {
+pub(in crate::view) fn draw_check(
+    frame: &mut Frame<'_>,
+    p: &Palette,
+    r: Rect,
+    checked: bool,
+    clip: Rect,
+) {
     if checked {
         frame.rect_clipped(r, p.accent, 3.0, clip);
         let (x, y, w, h) = (r.x, r.y, r.w, r.h);

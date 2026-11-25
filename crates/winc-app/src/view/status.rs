@@ -370,6 +370,31 @@ pub(super) fn draw_status(app: &mut App, frame: &mut Frame<'_>) {
     icons::gear(frame, center, color, bar);
     status_hits.push((pill, item));
 
+    if app.agent_enabled() {
+        let item = StatusItem::Agent;
+        let slot = right - icons::SIDEBAR_WIDTH;
+        right -= icons::SIDEBAR_WIDTH + STATUS_GAP;
+        let pill = Rect::new(
+            slot - CRUMB_PAD,
+            bar.y + 4.0,
+            icons::SIDEBAR_WIDTH + 2.0 * CRUMB_PAD,
+            bar.h - 8.0,
+        );
+        let hovered = app.pointer.hover == Hover::Status(item);
+        let open = app.agent.as_ref().is_some_and(|panel| panel.shown);
+        draw_button(frame, p, pill, bar, hovered, open);
+        let center = (slot + icons::SIDEBAR_WIDTH / 2.0, bar.y + bar.h / 2.0);
+        let color = if open {
+            p.accent
+        } else if hovered {
+            p.text
+        } else {
+            p.text_muted
+        };
+        icons::codex(frame, center, color, bar);
+        status_hits.push((pill, item));
+    }
+
     // 终端模块开着时左边是终端面板的开关：悬停时与其他可点击项一样铺按钮底色，面板开着时图标亮、
     // 保存时灰。面板保存、后台有命令结束了时右上角一个小点（失败了是红的），和标签上的一样。开关模
     // 块时淡入淡出，左边的几项跟着滑过去（`App::track_modules`）；消失途中点不到。
