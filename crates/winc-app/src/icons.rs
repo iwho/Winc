@@ -1029,6 +1029,16 @@ pub fn terminal(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip:
     frame.stroke(shapes.as_slice(), STROKE, color, clip);
 }
 
+/// Draws a clock beside an elapsed time.
+pub fn clock(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip: Rect) {
+    let shapes = [
+        Stroke::Arc(cx, cy, RING, -PI, PI),
+        Stroke::Line(cx, cy - 3.0, cx, cy),
+        Stroke::Line(cx, cy, cx + 2.0, cy + 1.5),
+    ];
+    frame.stroke(&shapes, RING_STROKE, color, clip);
+}
+
 /// Codex chat bubble with a four-point mark, sized for the status bar.
 pub fn codex(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip: Rect) {
     let outline = rounded_outline(cx - 7.0, cy - 6.5, 14.0, 11.0, 3.5);

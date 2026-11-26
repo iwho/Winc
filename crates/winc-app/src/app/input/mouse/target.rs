@@ -83,6 +83,7 @@ impl App {
         client.extend(self.sidebar_tabs().iter().map(|(r, _)| *r));
         client.extend(self.hits.tree_tools.iter().map(|(r, _)| *r));
         client.extend(self.hits.terminal.iter().map(|(r, _)| *r));
+        client.extend(self.agent_caption_controls());
         client.extend(self.hits.merge.iter().map(|(r, _)| *r));
         client.extend(self.hits.crumbs.iter().map(|(r, _)| *r));
         client.extend(self.hits.status.iter().map(|(r, _)| *r));
@@ -476,7 +477,9 @@ impl App {
         }
         if y < TOP_BAR_END {
             // 前台以外窗格的标签栏控件：按下时先切换到该窗格（见 `on_mouse_down`）。
-            if self.background_tab_controls().any(|r| r.contains(x, y)) {
+            if self.background_tab_controls().any(|r| r.contains(x, y))
+                || self.agent_caption_controls().any(|r| r.contains(x, y))
+            {
                 return Target::Blocked;
             }
             return Target::TitleBar;

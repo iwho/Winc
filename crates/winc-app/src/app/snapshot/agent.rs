@@ -36,10 +36,21 @@ fn agent_panel_is_lazy_and_uses_the_multiline_input_pipeline() {
 
     let before = app.agent_rects().body.w;
     let divider = app.agent_rects().divider;
+    let edge = (divider.x + divider.w / 2.0, divider.y + 30.0);
+    app.on_mouse_move(edge.0, edge.1);
+    paint(&mut app);
+    assert!(near(pixel(&app, edge), app.palette.frame_bg));
+
     assert!(app.agent_click(divider.x + 2.0, divider.y + 30.0));
-    app.on_mouse_move(divider.x - 48.0, divider.y + 30.0);
+    app.on_mouse_move(divider.x - 500.0, divider.y + 30.0);
     app.on_mouse_up(MouseButton::Left);
-    assert!(app.agent_rects().body.w > before);
+    assert_eq!(app.agent_rects().body.w, before);
+
+    assert!(app.agent_click(divider.x + 2.0, divider.y + 30.0));
+    app.on_mouse_move(divider.x + 50.0, divider.y + 30.0);
+    app.on_mouse_up(MouseButton::Left);
+    let narrowed = app.agent_rects().body.w;
+    assert!(narrowed < before);
 
     paint(&mut app);
     assert_eq!(codex_button(&app), Some(button));
@@ -47,6 +58,9 @@ fn agent_panel_is_lazy_and_uses_the_multiline_input_pipeline() {
     assert_eq!(app.focus, Focus::Editor);
     assert_eq!(app.layout.editor.w, editor_width);
     assert_eq!(app.agent.as_ref().unwrap().field.text(), "你好\n第二行");
+
+    click(&mut app, button);
+    assert_eq!(app.agent_rects().body.w, narrowed);
 }
 
 #[test]
@@ -80,6 +94,7 @@ fn agent_attaches_the_editor_selection_and_opens_local_references() {
 #[test]
 fn standalone_agent_shows_a_composer_without_file_actions() {
     let mut app = blank_app(true);
+    app.window.controls = true;
     paint(&mut app);
     let button = codex_button(&app).unwrap();
     click(&mut app, button);
@@ -90,6 +105,11 @@ fn standalone_agent_shows_a_composer_without_file_actions() {
     }
     let panel = app.agent.as_ref().unwrap();
     assert!(panel.field.view.area.h > 0.0);
+    assert_eq!(panel.rects.body.y, app.layout.window.y);
+    assert!(near(
+        pixel(&app, (panel.rects.body.x + 2.0, panel.rects.body.y + 2.0)),
+        app.palette.editor_bg
+    ));
     assert!(
         !panel
             .hits
@@ -101,7 +121,52 @@ fn standalone_agent_shows_a_composer_without_file_actions() {
         .iter()
         .find(|(_, hit)| matches!(hit, crate::app::agent::Hit::Close))
         .unwrap();
+    assert_eq!((close.w, close.h), (BUTTON, BUTTON));
+    assert_eq!(close.y, app.layout.sidebar_button.y);
+    assert!(close.right() <= app.layout.controls.x);
+    assert!(app.caption_controls().contains(close));
     let point = (close.x + close.w / 2.0, close.y + close.h / 2.0);
+    assert!(!app.over_title_bar(point.0, point.1));
+    assert!(app.over_title_bar(panel.rects.body.x + SIDEBAR_GAP + BUTTON_SMALL, point.1));
+    let controls = app.layout.controls;
+    assert!(!app.agent_click(controls.x + 4.0, controls.y + 4.0));
     click(&mut app, point);
     assert!(!app.agent.as_ref().unwrap().shown);
+}
+
+#[test]
+fn agent_header_reflows_navigation_and_keeps_caption_controls_clear() {
+    use crate::app::agent::{Connection, Hit, Tab};
+
+    let mut app = blank_app(false);
+    app.window.controls = true;
+    app.toggle_agent();
+    app.agent.as_mut().unwrap().connection = Connection::Ready;
+
+    for (width, inline) in [(750.0, true), (240.0, false)] {
+        app.agent.as_mut().unwrap().width = width;
+        paint(&mut app);
+        let panel = app.agent.as_ref().unwrap();
+        let history = panel
+            .hits
+            .iter()
+            .find_map(|(rect, hit)| matches!(hit, Hit::Show(Tab::History)).then_some(*rect))
+            .unwrap();
+        let new = panel
+            .hits
+            .iter()
+            .find_map(|(rect, hit)| matches!(hit, Hit::New).then_some(*rect))
+            .unwrap();
+        assert_eq!(new.y, app.layout.sidebar_button.y);
+        assert!(new.right() <= app.layout.controls.x);
+        let caption_controls = app.caption_controls();
+        assert!(caption_controls.contains(&new));
+        assert_eq!(caption_controls.contains(&history), inline);
+        if inline {
+            assert!(new.right() < history.x);
+            assert!(history.bottom() <= TOP_BAR_END);
+        } else {
+            assert!(history.y >= TOP_BAR_END);
+        }
+    }
 }

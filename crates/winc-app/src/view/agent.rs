@@ -12,7 +12,12 @@ use crate::layout::wrap_text;
 use super::*;
 
 const ROW: f32 = 20.0;
-const PAD: f32 = 14.0;
+const CARD_PAD: f32 = TAB_INSET;
+const CARD_GAP: f32 = SIDEBAR_GAP;
+const CONTENT_TOP: f32 = SIDEBAR_LIST_GAP;
+const USER_MESSAGE_PAD_Y: f32 = SIDEBAR_GAP;
+const STATUS_TOP_GAP: f32 = SIDEBAR_GAP + SIDEBAR_LIST_GAP;
+const RUNNING_SPIN_SCALE: f32 = 0.5;
 
 pub(super) fn draw(app: &mut App, frame: &mut Frame<'_>) {
     if app.agent_rects().body.w <= 0.0 {
@@ -30,23 +35,37 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     let area = panel.rects.body;
     panel.hits.clear();
     panel.text_hits.clear();
-    if area.w <= 0.0 || area.h < 110.0 {
+    panel.viewport = Rect::default();
+    if area.w <= 0.0 || area.h <= 0.0 {
         return;
     }
     let p = app.palette;
-    frame.rect_clipped(area, p.sidebar_bg, RADIUS_ISLAND, area);
-    let divider = panel.rects.divider;
-    let (x, y) = app.mouse();
-    if divider.contains(x, y) {
-        frame.rect(
-            Rect::new(divider.x + 3.0, divider.y, 2.0, divider.h),
-            p.accent,
-        );
+    frame.rect(area, p.editor_bg);
+    if area.h < 110.0 {
+        panel.field.view.area = Rect::default();
+        return;
     }
-    let body = area.inset(PAD, 12.0);
-    let header = Rect::new(body.x, body.y, body.w, 30.0);
-    let close = Rect::new(header.right() - 25.0, header.y + 2.0, 25.0, 25.0);
-    let new = Rect::new(close.x - 96.0, header.y + 2.0, 90.0, 25.0);
+    let (x, y) = app.mouse();
+    let body = area.inset(SIDEBAR_GAP, SIDEBAR_GAP);
+    let caption = app.layout.top_bar;
+    let overlaps_caption = |rect: Rect| rect.y < caption.bottom() && rect.bottom() > caption.y;
+    // Like the terminal, keep the sidebar toggle and the window buttons clear.
+    // The sidebar toggle is already positioned beyond the native traffic lights.
+    let toggle = app.layout.sidebar_button;
+    let start = if overlaps_caption(toggle) {
+        body.x.max(toggle.right() + TAB_GAP)
+    } else {
+        body.x
+    };
+    let controls = app.layout.controls;
+    let end = if controls.w > 0.0 && overlaps_caption(controls) {
+        (controls.x - TAB_GAP).min(body.right())
+    } else {
+        body.right()
+    };
+    let header = Rect::new(start, caption.y, (end - start).max(0.0), caption.h);
+    let button_y = header.y + (header.h - BUTTON) / 2.0;
+    let close = Rect::new(end - BUTTON, button_y, BUTTON, BUTTON).intersect(header);
     let project_matches = app.agent_matches_workspace(panel);
     let (label, action, enabled) = match panel.connection {
         _ if !project_matches && panel.root.is_some() => (
@@ -55,126 +74,74 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             !panel.any_active(),
         ),
         Connection::Ready => (t!("agent-new"), Hit::New, true),
-        Connection::Connecting => (t!("agent-new"), Hit::New, false),
-        _ => (t!("agent-reconnect"), Hit::Retry, true),
+        Connection::Connecting => (t!("agent-reconnect"), Hit::Retry, false),
+        _ => (t!("agent-reconnect"), Hit::Retry, !panel.any_active()),
     };
-    Actions {
-        app,
-        frame,
-        hits: &mut panel.hits,
-    }
-    .button(new, label, action, false, enabled);
-    let hovered = close.contains(x, y);
-    draw_button(frame, p, close, area, hovered, false);
-    icons::close(
-        frame,
-        (close.x + close.w / 2.0, close.y + close.h / 2.0),
-        9.0,
-        p.text_muted,
-        area,
-    );
-    panel.hits.push((close, Hit::Close));
-
-    let icon = Rect::new(header.x, header.y + 2.0, 26.0, 25.0);
-    frame.rect_clipped(icon, p.accent.alpha(0.12), 7.0, area);
-    icons::codex(frame, (icon.x + 13.0, icon.y + 12.0), p.accent, area);
-    let title = Rect::new(
-        icon.right() + 8.0,
-        header.y,
-        (new.x - icon.right() - 12.0).max(0.0),
-        header.h,
-    );
+    let icon = Rect::new(header.x, button_y, BUTTON_SMALL, BUTTON).intersect(header);
+    let title_x = icon.right() + TAB_GAP;
+    let title_min = frame.measure(FontKind::Ui, app.fonts.ui, t!("agent-title"));
+    let history_label = t!("agent-history");
+    let history_w = button_width(app, frame, history_label);
+    let action_w =
+        button_width(app, frame, label).min((close.x - title_x - title_min - TAB_GAP).max(0.0));
+    let actions_end = close.x - TAB_GAP;
+    let inline_history =
+        actions_end - history_w - TAB_GAP - action_w >= title_x + title_min + SIDEBAR_GAP;
+    let history = Rect::new(actions_end - history_w, button_y, history_w, BUTTON);
+    let action_end = if inline_history {
+        history.x - TAB_GAP
+    } else {
+        actions_end
+    };
+    let action_rect =
+        Rect::new(action_end - action_w, button_y, action_w, BUTTON).intersect(header);
+    let title_end = action_rect.x - TAB_GAP;
+    let title = Rect::new(title_x, header.y, (title_end - title_x).max(0.0), header.h);
     let title_text = panel.session_title().unwrap_or(t!("agent-title"));
-    let title_text = ellipsize(frame, title_text, app.fonts.ui, title.w);
+    let title_text = truncate_end(frame, title_text, app.fonts.ui, title.w);
+    frame.rect_clipped(icon.inset(0.0, 2.0), p.selected, RADIUS_ROW, header);
+    icons::codex(frame, center(icon), p.accent, icon);
     ui_text(frame, app, title.x, title, &title_text, p.text, title);
-
-    let nav = Rect::new(body.x, header.bottom() + 8.0, body.w, 26.0);
-    let names = [
-        (
-            t!("agent-history"),
-            Tab::History,
-            panel.connection == Connection::Ready,
-        ),
-        (
-            panel
-                .model()
-                .map_or(t!("agent-model"), |model| model.name.as_str()),
-            Tab::Models,
-            !panel.models().is_empty(),
-        ),
-        (
-            panel.effort().unwrap_or(t!("agent-effort")),
-            Tab::Efforts,
-            panel.model().is_some(),
-        ),
-    ];
-    let mut nav_hits = Vec::new();
+    let history_enabled = panel.connection == Connection::Ready;
     {
-        let actions = Actions {
+        let history_selected = panel.tab == Tab::History;
+        let mut buttons = Actions {
             app,
             frame,
-            hits: &mut nav_hits,
+            hits: &mut panel.hits,
         };
-        let w = ((nav.w - 8.0) / 3.0).max(0.0);
-        for (i, (label, tab, enabled)) in names.iter().enumerate() {
-            let area = Rect::new(nav.x + i as f32 * (w + 4.0), nav.y, w, nav.h);
-            let selected = panel.tab == *tab;
-            let hovered = *enabled && area.contains(x, y);
-            draw_toggle(actions.frame, p, area, nav, hovered, selected);
-            let color = if !enabled {
-                p.text_dim
-            } else if selected {
-                p.accent
-            } else {
-                p.text_muted
-            };
-            let text_area = area.inset(6.0, 0.0);
-            let label = ellipsize(actions.frame, label, app.fonts.ui_small, text_area.w);
-            ui_text_small(
-                actions.frame,
-                app,
-                text_area.x,
-                area,
-                &label,
-                color,
-                text_area,
+        buttons.button(action_rect, label, action, false, enabled);
+        if inline_history {
+            buttons.button(
+                history,
+                history_label,
+                Hit::Show(Tab::History),
+                history_selected,
+                history_enabled,
             );
-            if *enabled {
-                actions.hits.push((area, Hit::Show(*tab)));
-            }
         }
     }
-    panel.hits.extend(nav_hits);
-    let status_top = nav.bottom() + 9.0;
-    let warning = panel.error.is_some() || !project_matches || panel.approval().is_some();
-    let status_color = if warning { p.warning } else { p.text_muted };
-    let dot = if warning {
-        p.warning
-    } else if panel.busy() {
-        p.accent
-    } else {
-        p.text_dim
-    };
-    let status = if !project_matches && panel.root.is_some() {
-        t!("agent-project-changed")
-    } else {
-        panel.status()
-    };
-    let dot_rect = Rect::new(body.x + 2.0, status_top + 7.0, 5.0, 5.0);
-    frame.rect_clipped(dot_rect, dot, 2.5, body);
-    let rows = wrap_text(status, (body.w - 14.0).max(4.0), |text| {
-        frame.measure(FontKind::Ui, app.fonts.ui, text)
-    });
-    for (i, text) in rows.iter().take(3).enumerate() {
-        let line = Rect::new(
-            body.x + 14.0,
-            status_top + ROW * i as f32,
-            body.w - 14.0,
-            ROW,
-        );
-        ui_text_small(frame, app, line.x, line, text, status_color, body);
+    draw_button(frame, p, close, area, close.contains(x, y), false);
+    icons::collapse(
+        frame,
+        center(close),
+        icons::Direction::Right,
+        p.text_muted,
+        close,
+    );
+    if close.w > 0.0 {
+        panel.hits.push((close, Hit::Close));
     }
-    let mut top = status_top + ROW * rows.len().min(3) as f32 + 8.0;
+
+    let toolbar = Rect::new(
+        body.x,
+        header.bottom() + BUTTON_GAP,
+        body.w,
+        BUTTON + 2.0 * BUTTON_GAP,
+    );
+    let history = (!inline_history).then_some((history_label, history_w, history_enabled));
+    draw_session_controls(app, frame, panel, toolbar, history);
+    let mut top = toolbar.bottom() + SIDEBAR_LIST_GAP;
     if panel.workspace_parallel {
         let warning = t!("agent-parallel");
         let lines = wrap_text(warning, body.w, |text| {
@@ -186,29 +153,25 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             top += ROW;
         }
     }
-    if let Some(tokens) = panel.token_label() {
-        let row = Rect::new(body.x, top, body.w, ROW);
-        ui_text(frame, app, row.x, row, &tokens, p.text_dim, body);
-        top += ROW;
-    }
-
     let focused = app.focus == Focus::Agent;
     let input_h = 60.0_f32.min((body.h * 0.22).max(20.0));
-    let composer = Rect::new(
-        body.x,
-        body.bottom() - input_h - 36.0,
-        body.w,
-        input_h + 36.0,
-    );
+    let composer_h = input_h + BUTTON_SMALL + 3.0 * SIDEBAR_LIST_GAP;
+    let composer = Rect::new(body.x, body.bottom() - composer_h, body.w, composer_h);
     let footer = Rect::new(
-        composer.x + 7.0,
-        composer.bottom() - 30.0,
-        (composer.w - 14.0).max(0.0),
-        24.0,
+        composer.x + SIDEBAR_LIST_GAP,
+        composer.bottom() - BUTTON_SMALL - SIDEBAR_LIST_GAP,
+        (composer.w - 2.0 * SIDEBAR_LIST_GAP).max(0.0),
+        BUTTON_SMALL,
     );
-    let send = Rect::new(footer.right() - 58.0, footer.y, 58.0, footer.h);
-    let stop = Rect::new(send.x - 54.0, footer.y, 50.0, footer.h);
-    let action_y = composer.y - 28.0;
+    let can_send = project_matches && panel.can_send();
+    let can_stop = panel.can_stop();
+    let send_label = if can_stop {
+        t!("agent-steer")
+    } else {
+        t!("agent-send")
+    };
+    let send_w = button_width(app, frame, send_label).min(footer.w);
+    let send = Rect::new(footer.right() - send_w, footer.y, send_w, footer.h);
     let can_attach = project_matches
         && !panel.standalone
         && app
@@ -217,31 +180,52 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             .is_some_and(|doc| doc.path.is_some() && doc.holds_file_text());
     let can_review =
         !panel.standalone || panel.changes().is_some_and(|changes| !changes.is_empty());
-    let can_send = project_matches && panel.can_send();
-    let can_stop = panel.can_stop();
+    let change_label = if panel.tab == Tab::Changes {
+        t!("agent-chat")
+    } else {
+        t!("agent-changes")
+    };
+    let change_w =
+        button_width(app, frame, change_label).min((send.x - footer.x - BUTTON_GAP).max(0.0));
+    let changes = Rect::new(send.x - BUTTON_GAP - change_w, footer.y, change_w, footer.h);
+    let context_end = if can_review { changes.x } else { send.x };
+    let status_bottom = composer.y - SIDEBAR_GAP;
+    // On short windows, prioritize turn controls and the composer over token details.
+    if status_bottom - top >= 4.0 * ROW
+        && let Some((tokens, fraction)) = panel.token_summary()
+    {
+        top = draw_tokens(
+            app,
+            frame,
+            Rect::new(body.x, top, body.w, ROW),
+            &tokens,
+            fraction,
+        );
+    }
+    let status_top = draw_status(
+        app,
+        frame,
+        panel,
+        Rect::new(body.x, top, body.w, (status_bottom - top).max(0.0)),
+        project_matches,
+    );
     let attachment_path = panel.attachment.as_ref().map(|attached| attached.path());
     let field = Rect::new(
-        composer.x + 9.0,
-        composer.y + 4.0,
-        (composer.w - 18.0).max(0.0),
+        composer.x + SIDEBAR_GAP,
+        composer.y + SIDEBAR_LIST_GAP,
+        (composer.w - 2.0 * SIDEBAR_GAP).max(0.0),
         input_h,
     );
-    let outline = if focused {
-        p.accent.alpha(0.46)
-    } else {
-        p.border
-    };
-    frame.rect_clipped(composer, p.group_bg, 10.0, body);
-    frame.stroke(
-        &icons::rounded_outline(
-            composer.x + 0.5,
-            composer.y + 0.5,
-            (composer.w - 1.0).max(0.0),
-            composer.h - 1.0,
-            9.5,
-        ),
-        1.0,
-        outline,
+    surface(
+        frame,
+        composer,
+        p.group_bg,
+        if focused {
+            p.accent.alpha(0.5)
+        } else {
+            p.border
+        },
+        RADIUS_ROW + 3.0,
         body,
     );
     {
@@ -250,32 +234,18 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             frame,
             hits: &mut panel.hits,
         };
-        let send_label = if can_stop {
-            t!("agent-steer")
-        } else {
-            t!("agent-send")
-        };
         actions.button(send, send_label, Hit::Send, true, can_send);
-        if can_stop {
-            actions.button(stop, t!("agent-stop"), Hit::Stop, false, true);
-        }
         if can_review {
-            let changes = Rect::new(body.right() - 67.0, action_y, 67.0, 22.0);
-            let change_label = if panel.tab == Tab::Changes {
-                t!("agent-chat")
-            } else {
-                t!("agent-changes")
-            };
             actions.button(
                 changes,
                 change_label,
                 Hit::Show(Tab::Changes),
-                false,
+                panel.tab == Tab::Changes,
                 project_matches,
             );
         }
         if let Some(path) = attachment_path {
-            let end = if can_stop { stop.x } else { send.x };
+            let end = context_end;
             let remove = Rect::new(
                 footer.x,
                 footer.y,
@@ -300,7 +270,7 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
                 bounds,
             );
         } else if can_attach {
-            let end = if can_stop { stop.x } else { send.x };
+            let end = context_end;
             let attach = Rect::new(
                 footer.x,
                 footer.y,
@@ -335,7 +305,7 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
                 );
             }
         } else if panel.standalone && footer.w >= 205.0 {
-            let end = if can_stop { stop.x } else { send.x };
+            let end = context_end;
             let hint = Rect::new(
                 footer.x + 3.0,
                 footer.y,
@@ -366,10 +336,10 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     if focused {
         app.ime.cursor = cursor;
     }
-    let chat_end = if can_review { action_y } else { composer.y } - 8.0;
+    let chat_end = status_top - STATUS_TOP_GAP;
     let area = Rect::new(body.x, top, body.w, (chat_end - top).max(0.0));
     frame.rect_clipped(
-        Rect::new(body.x, top - 4.0, body.w, 1.0),
+        Rect::new(body.x, top - SIDEBAR_LIST_GAP, body.w, 1.0),
         p.border.alpha(0.55),
         0.0,
         body,
@@ -392,16 +362,16 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     }
     if focused && app.ime.field_preedit.is_empty() {
         let choices: Vec<_> = panel.completion.labels().collect();
-        let count = choices.len().min((area.h / 24.0) as usize);
+        let count = choices.len().min((area.h / TREE_ROW) as usize);
         let mut overlay = Vec::new();
         for (index, (label, selected)) in choices.into_iter().take(count).enumerate() {
             let row = Rect::new(
                 area.x,
-                area.bottom() - (count - index) as f32 * 24.0,
+                area.bottom() - (count - index) as f32 * TREE_ROW,
                 area.w,
-                24.0,
+                TREE_ROW,
             );
-            frame.rect_clipped(row, p.sidebar_bg, 0.0, area);
+            frame.rect_clipped(row, p.popup_bg, 0.0, area);
             Actions {
                 app,
                 frame,
@@ -413,6 +383,309 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     }
 }
 
+fn button_width(app: &App, frame: &mut Frame<'_>, label: &str) -> f32 {
+    frame.measure(FontKind::Ui, app.fonts.ui, label).ceil() + 2.0 * SIDEBAR_GAP
+}
+
+fn surface(frame: &mut Frame<'_>, rect: Rect, fill: Color, edge: Color, radius: f32, clip: Rect) {
+    frame.rect_clipped(rect, edge, radius, clip);
+    frame.rect_clipped(rect.inset(1.0, 1.0), fill, radius - 1.0, clip);
+}
+
+fn draw_session_controls(
+    app: &App,
+    frame: &mut Frame<'_>,
+    panel: &mut Panel,
+    bar: Rect,
+    history: Option<(&str, f32, bool)>,
+) {
+    let p = app.palette;
+    surface(frame, bar, p.group_bg, p.border, RADIUS_ROW + 2.0, bar);
+    let inner = bar.inset(BUTTON_GAP, BUTTON_GAP);
+    let history_w = history.map_or(0.0, |(_, width, _)| width.min(inner.w / 3.0));
+    let available = (inner.w - history_w).max(0.0);
+    let effort = panel.effort().unwrap_or(t!("agent-effort"));
+    let effort_w = (button_width(app, frame, effort) + 12.0).min(available * 0.45);
+    let model = panel
+        .model()
+        .map_or(t!("agent-model"), |model| model.name.as_str());
+    let model_w = (button_width(app, frame, model) + 12.0).min(available - effort_w);
+    let model_rect = Rect::new(inner.x, inner.y, model_w, inner.h);
+    let effort_rect = Rect::new(inner.right() - effort_w, inner.y, effort_w, inner.h);
+    let model_enabled = !panel.models().is_empty();
+    let effort_enabled = panel.model().is_some();
+    let (model_hit, effort_hit) = (panel.tab == Tab::Models, panel.tab == Tab::Efforts);
+    let controls = [
+        (model_rect, model, Tab::Models, model_enabled, model_hit),
+        (
+            effort_rect,
+            effort,
+            Tab::Efforts,
+            effort_enabled,
+            effort_hit,
+        ),
+    ];
+    let (x, y) = app.mouse();
+    for (rect, label, tab, enabled, selected) in controls {
+        draw_button(
+            frame,
+            p,
+            rect,
+            inner,
+            enabled && rect.contains(x, y),
+            selected || tab == Tab::Models,
+        );
+        let arrow_w = if enabled { 13.0 } else { 0.0 };
+        let room = Rect::new(
+            rect.x + SIDEBAR_LIST_GAP,
+            rect.y,
+            (rect.w - 2.0 * SIDEBAR_LIST_GAP - arrow_w).max(0.0),
+            rect.h,
+        );
+        let label = truncate_end(frame, label, app.fonts.ui_small, room.w);
+        ui_text_small(
+            frame,
+            app,
+            room.x,
+            room,
+            &label,
+            if enabled { p.text } else { p.text_dim },
+            room,
+        );
+        if enabled && rect.w > 0.0 {
+            icons::chevron(
+                frame,
+                (rect.right() - SIDEBAR_GAP, center(rect).1),
+                7.0,
+                if selected {
+                    icons::Direction::Up
+                } else {
+                    icons::Direction::Down
+                },
+                p.text_muted,
+                rect,
+            );
+        }
+    }
+    let hits = controls.map(|(rect, _, tab, enabled, _)| {
+        (enabled && rect.w > 0.0).then_some((rect, Hit::Show(tab)))
+    });
+    panel.hits.extend(hits.into_iter().flatten());
+    if let Some((label, _, enabled)) = history {
+        let rect = Rect::new(effort_rect.x - history_w, inner.y, history_w, inner.h);
+        Actions {
+            app,
+            frame,
+            hits: &mut panel.hits,
+        }
+        .button(
+            rect,
+            label,
+            Hit::Show(Tab::History),
+            panel.tab == Tab::History,
+            enabled,
+        );
+    }
+}
+
+fn draw_tokens(
+    app: &App,
+    frame: &mut Frame<'_>,
+    row: Rect,
+    label: &str,
+    fraction: Option<f32>,
+) -> f32 {
+    let p = app.palette;
+    let percent = fraction.map(|fraction| format!("{:.0}%", fraction * 100.0));
+    let percent_w = percent.as_deref().map_or(0.0, |percent| {
+        frame
+            .measure(FontKind::Ui, app.fonts.ui_small, percent)
+            .ceil()
+            + SIDEBAR_GAP
+    });
+    let inline = frame.measure(FontKind::Ui, app.fonts.ui_small, label) + percent_w <= row.w;
+    let label_w = if inline { row.w - percent_w } else { row.w };
+    let lines = wrap_text(label, label_w.max(4.0), |text| {
+        frame.measure(FontKind::Ui, app.fonts.ui_small, text)
+    });
+    let mut top = row.y;
+    for text in lines.into_iter().take(2) {
+        let line = Rect::new(row.x, top, label_w, row.h);
+        ui_text_small(frame, app, line.x, line, text, p.text_muted, line);
+        top += ROW - BUTTON_GAP;
+    }
+    if let (Some(fraction), Some(percent)) = (fraction, percent) {
+        let percent_y = if inline { row.y } else { top };
+        let value = Rect::new(row.right() - percent_w, percent_y, percent_w, row.h);
+        ui_text_small(
+            frame,
+            app,
+            value.x + SIDEBAR_GAP,
+            value,
+            &percent,
+            p.text_muted,
+            value,
+        );
+        let track = if inline {
+            Rect::new(row.x, top + BUTTON_GAP, row.w, 4.0)
+        } else {
+            Rect::new(
+                row.x,
+                top + (ROW - 4.0) / 2.0,
+                (row.w - percent_w).max(0.0),
+                4.0,
+            )
+        };
+        frame.rect_clipped(track, p.switch_off, 2.0, track);
+        let fill = Rect::new(track.x, track.y, track.w * fraction, track.h);
+        frame.rect_clipped(fill, p.accent, 2.0, track);
+        top = if inline {
+            track.bottom()
+        } else {
+            value.bottom()
+        };
+    }
+    top + SIDEBAR_GAP
+}
+
+fn draw_status(
+    app: &App,
+    frame: &mut Frame<'_>,
+    panel: &mut Panel,
+    area: Rect,
+    project_matches: bool,
+) -> f32 {
+    let max_rows = ((area.h / BUTTON_SMALL) as usize).min(3);
+    if max_rows == 0 {
+        return area.bottom();
+    }
+    let p = app.palette;
+    let warning = panel.error.is_some()
+        || panel.connection != Connection::Ready
+        || !project_matches
+        || panel.approval().is_some();
+    let status_color = if warning { p.warning } else { p.text_muted };
+    let status = if !project_matches && panel.root.is_some() {
+        t!("agent-project-changed")
+    } else {
+        panel.status()
+    };
+    let elapsed = panel.turn_elapsed().map(|elapsed| {
+        let seconds = elapsed.as_secs();
+        let duration = format!("{}:{:02}", seconds / 60, seconds % 60);
+        let label = t!("agent-elapsed", duration = duration.as_str());
+        (duration, label)
+    });
+    let stop_label = t!("agent-stop");
+    let stop_w = if panel.can_stop() {
+        button_width(app, frame, stop_label).min(area.w)
+    } else {
+        0.0
+    };
+    let elapsed_w = elapsed.as_ref().map_or(0.0, |(_, label)| {
+        (frame
+            .measure(FontKind::Ui, app.fonts.ui_small, label)
+            .ceil()
+            + 17.0)
+            .min((area.w - stop_w - 2.0 * SIDEBAR_GAP).max(0.0) * 0.6)
+    });
+    let elapsed_end = area.right()
+        - if stop_w > 0.0 {
+            stop_w + SIDEBAR_GAP
+        } else {
+            0.0
+        };
+    let status_x = area.x + BUTTON_SMALL - BUTTON_GAP;
+    let status_w = (elapsed_end - elapsed_w - SIDEBAR_GAP - status_x).max(0.0);
+    let rows = wrap_text(status, status_w.max(4.0), |text| {
+        frame.measure(FontKind::Ui, app.fonts.ui_small, text)
+    });
+    let top = area.bottom() - BUTTON_SMALL * rows.len().clamp(1, max_rows) as f32;
+    frame.rect_clipped(
+        Rect::new(area.x, top - 1.0, area.w, 1.0),
+        p.border,
+        0.0,
+        area,
+    );
+    let glyph = (area.x + 8.0, top + BUTTON_SMALL / 2.0);
+    if warning {
+        icons::warning(frame, glyph, p.warning, area);
+    } else if panel.busy() {
+        icons::refresh_turned(
+            frame,
+            glyph,
+            icons::spin_turn() * RUNNING_SPIN_SCALE,
+            p.accent,
+            area,
+        );
+    } else {
+        frame.rect_clipped(
+            Rect::new(glyph.0 - 2.5, glyph.1 - 2.5, 5.0, 5.0),
+            p.text_dim,
+            2.5,
+            area,
+        );
+    }
+    for (index, text) in rows.iter().take(max_rows).enumerate() {
+        let line = Rect::new(
+            status_x,
+            top + BUTTON_SMALL * index as f32,
+            status_w,
+            BUTTON_SMALL,
+        );
+        let text = if index + 1 == max_rows && rows.len() > max_rows {
+            truncate_end(frame, &format!("{text}…"), app.fonts.ui_small, line.w)
+                .into_owned()
+                .into()
+        } else {
+            truncate_end(frame, text, app.fonts.ui_small, line.w)
+        };
+        ui_text_small(
+            frame,
+            app,
+            line.x,
+            line,
+            &text,
+            status_color,
+            line.intersect(area),
+        );
+    }
+    if let Some((duration, label)) = elapsed {
+        let line = Rect::new(elapsed_end - elapsed_w, top, elapsed_w, BUTTON_SMALL);
+        let label_w = frame.measure(FontKind::Ui, app.fonts.ui_small, &label);
+        let (label, width) = if label_w + 17.0 <= line.w {
+            (label, label_w)
+        } else {
+            let width = frame.measure(FontKind::Ui, app.fonts.ui_small, &duration);
+            (duration, width)
+        };
+        let text_x = line.right() - width;
+        if text_x - line.x >= 17.0 {
+            icons::clock(frame, (text_x - 10.0, center(line).1), p.text_muted, line);
+        }
+        ui_text_small(
+            frame,
+            app,
+            text_x.max(line.x),
+            line,
+            &label,
+            p.text_muted,
+            line,
+        );
+    }
+    if stop_w > 0.0 {
+        let stop = Rect::new(area.right() - stop_w, top + 2.0, stop_w, BUTTON_SMALL - 4.0);
+        surface(frame, stop, p.group_bg, p.border, RADIUS_ROW, area);
+        Actions {
+            app,
+            frame,
+            hits: &mut panel.hits,
+        }
+        .button(stop, stop_label, Hit::Stop, false, true);
+    }
+    top
+}
+
 fn draw_empty_chat(app: &App, frame: &mut Frame<'_>, area: Rect) {
     if area.h < 110.0 {
         return;
@@ -420,12 +693,10 @@ fn draw_empty_chat(app: &App, frame: &mut Frame<'_>, area: Rect) {
     let p = app.palette;
     let top = area.y + (area.h * 0.25).min(130.0);
     let center = area.x + area.w / 2.0;
-    let icon = Rect::new(center - 18.0, top, 36.0, 36.0);
-    frame.rect_clipped(icon, p.accent.alpha(0.1), 10.0, area);
-    icons::codex(frame, (center, top + 18.0), p.accent, area);
+    icons::codex(frame, (center, top + BUTTON / 2.0), p.text_muted, area);
     let label = t!("agent-empty-chat");
     let width = frame.measure(FontKind::Ui, app.fonts.ui, label);
-    let row = Rect::new(area.x, icon.bottom() + 9.0, area.w, 24.0);
+    let row = Rect::new(area.x, top + BUTTON + SIDEBAR_LIST_GAP, area.w, TREE_ROW);
     ui_text(
         frame,
         app,
@@ -504,7 +775,7 @@ fn draw_catalog(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect)
         panel.max_scroll = 0.0;
         return;
     }
-    let stride = 30.0;
+    let stride = TREE_ROW + BUTTON_GAP;
     panel.max_scroll = (rows.len() as f32 * stride - area.h).max(0.0);
     panel.scroll = panel.scroll.min(panel.max_scroll);
     let first = (panel.scroll / stride) as usize;
@@ -518,7 +789,7 @@ fn draw_catalog(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect)
         if y >= area.bottom() {
             break;
         }
-        let row = Rect::new(area.x, y, area.w, stride - 3.0).intersect(area);
+        let row = Rect::new(area.x, y, area.w, TREE_ROW).intersect(area);
         actions.button(row, &label, hit, selected, true);
     }
 }
@@ -597,11 +868,16 @@ fn draw_approval(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect
         return;
     };
     let (id, kind, reviewable) = (approval.id, approval.kind, approval.reviewable);
-    let head = Rect::new(area.x, area.y, area.w, 25.0);
+    let head = Rect::new(area.x, area.y, area.w, TAB_HEIGHT);
     let decisions = approval.decisions.clone();
-    let decision_row = Rect::new(area.x, head.bottom(), area.w, 24.0);
-    let copy = Rect::new(area.x, decision_row.bottom() + 3.0, 65.0, 22.0);
-    let top = copy.bottom() + 4.0;
+    let decision_row = Rect::new(area.x, head.bottom(), area.w, BUTTON_SMALL);
+    let copy = Rect::new(
+        area.x,
+        decision_row.bottom() + BUTTON_GAP,
+        65.0,
+        BUTTON_SMALL,
+    );
+    let top = copy.bottom() + SIDEBAR_LIST_GAP;
     let viewport = Rect::new(area.x, top, area.w, (area.bottom() - top).max(0.0));
     let lines = wrap_lines(
         frame,
@@ -621,7 +897,8 @@ fn draw_approval(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect
             frame,
             hits: &mut panel.hits,
         };
-        let width = ((decision_row.w + 3.0) / decisions.len().max(1) as f32 - 3.0).min(122.0);
+        let width =
+            ((decision_row.w + BUTTON_GAP) / decisions.len().max(1) as f32 - BUTTON_GAP).min(122.0);
         for (index, decision) in decisions.into_iter().enumerate() {
             let (label, grant) = match decision {
                 ApprovalDecision::Accept => (t!("agent-approve"), true),
@@ -630,7 +907,7 @@ fn draw_approval(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect
                 ApprovalDecision::Cancel => (t!("agent-cancel-turn"), false),
             };
             let button = Rect::new(
-                decision_row.x + index as f32 * (width + 3.0),
+                decision_row.x + index as f32 * (width + BUTTON_GAP),
                 decision_row.y,
                 width,
                 decision_row.h,
@@ -722,22 +999,31 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
             let layout = card.layout.as_ref().expect("card laid out");
             let ordinal = chat.first + index;
             text.card = ordinal;
-            let compact =
-                matches!(card.item.kind, ItemKind::Read | ItemKind::Search) && !card.expanded;
+            let compact = compact_tool_card(card);
             let block = Rect::new(
                 area.x,
                 y,
                 width,
-                card.height - if compact { 1.0 } else { 4.0 },
+                card.height - if compact { BUTTON_GAP } else { CARD_GAP },
             );
             let p = app.palette;
             match card.item.kind {
-                ItemKind::User => frame.rect_clipped(block, p.accent.alpha(0.095), 8.0, area),
+                ItemKind::User => {
+                    let bubble = Rect::new(block.x, y + TREE_ROW, block.w, block.h - TREE_ROW);
+                    surface(
+                        frame,
+                        bubble,
+                        p.selected.alpha(0.25),
+                        p.tab_edge.alpha(0.5),
+                        RADIUS_TAB,
+                        area,
+                    );
+                }
                 ItemKind::Message => {}
-                _ => frame.rect_clipped(block, p.group_bg, 6.0, area),
+                _ => surface(frame, block, p.group_bg, p.border, RADIUS_TAB, area),
             }
-            let heading =
-                Rect::new(block.x + 5.0, y, (block.w - 62.0).max(0.0), 24.0).intersect(area);
+            let heading = Rect::new(block.x + CARD_PAD, y, (block.w - 62.0).max(0.0), TREE_ROW)
+                .intersect(area);
             let name = match card.item.kind {
                 ItemKind::User => t!("agent-user"),
                 ItemKind::Message => t!("agent-title"),
@@ -770,16 +1056,45 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                     },
                     heading,
                 );
-                let copy = Rect::new(block.right() - 57.0, y, 53.0, 24.0).intersect(area);
-                actions.button(
-                    copy,
-                    t!("agent-copy"),
-                    Hit::CopyMessage(ordinal),
-                    false,
-                    true,
-                );
+                let (x, mouse_y) = app.mouse();
+                if app.cursor_inside() && block.intersect(area).contains(x, mouse_y) {
+                    let copy = Rect::new(
+                        block.right() - CARD_PAD - BUTTON_SMALL,
+                        y,
+                        BUTTON_SMALL,
+                        TREE_ROW,
+                    );
+                    let hit = copy.intersect(area);
+                    draw_button(
+                        actions.frame,
+                        p,
+                        copy,
+                        area,
+                        hit.contains(x, mouse_y),
+                        false,
+                    );
+                    icons::copy(actions.frame, center(copy), p.text_muted, hit);
+                    if hit.h > 0.0 {
+                        actions.hits.push((hit, Hit::CopyMessage(ordinal)));
+                    }
+                    if let Some((hour, minute)) = card.message_time {
+                        let label = format!("{hour:02}:{minute:02}");
+                        let width = actions
+                            .frame
+                            .measure(FontKind::Ui, app.fonts.ui_small, &label);
+                        let time = Rect::new(copy.x - BUTTON_GAP - width, y, width, TREE_ROW);
+                        ui_text_small(
+                            actions.frame,
+                            app,
+                            time.x,
+                            time,
+                            &label,
+                            p.text_muted,
+                            time.intersect(area),
+                        );
+                    }
+                }
             } else {
-                let sign = if card.expanded { "▾" } else { "▸" };
                 let status = if card.item.status.is_empty() {
                     if card.done {
                         t!("agent-done-tool")
@@ -797,21 +1112,28 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                     }
                 };
                 let label = if compact {
-                    format!(
-                        "{sign} {name} · {status}  {}",
-                        winc_agent::prefix(&card.item.text, 180)
-                    )
+                    let preview = winc_agent::prefix(&card.item.text, 180)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    format!("{name} · {status}  {preview}")
                 } else {
-                    format!("{sign} {name} · {status}")
+                    format!("{name} · {status}")
                 };
-                let header = Rect::new(block.x + 4.0, y, block.w - 8.0, 24.0).intersect(area);
-                actions.button(header, &label, Hit::Expand(ordinal), false, true);
+                let header = Rect::new(block.x + 1.0, y, (block.w - 2.0).max(0.0), TREE_ROW);
+                draw_tool_heading(&mut actions, card, ordinal, header, area, &label);
             }
-            let row_top = y + 24.0;
-            let clip = Rect::new(block.x, row_top, block.w, card.height - 28.0).intersect(area);
+            let row_top = y + TREE_ROW + content_top(card.item.kind);
+            let clip = Rect::new(
+                block.x,
+                row_top,
+                block.w,
+                (block.bottom() - row_top).max(0.0),
+            )
+            .intersect(area);
             match &layout.body {
                 Body::Lines(lines) => {
-                    let x = block.x + 7.0;
+                    let x = block.x + CARD_PAD;
                     let first = ((clip.y - row_top) / ROW).floor().max(0.0) as usize;
                     for (section, line) in lines.iter().enumerate().skip(first) {
                         let y = row_top + section as f32 * ROW;
@@ -842,7 +1164,7 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                     }
                 }
                 Body::Markdown(blocks) => {
-                    let left = block.x + 7.0;
+                    let left = block.x + CARD_PAD;
                     let mut shown = blocks
                         .partition_point(|block| row_top + block.top + block.laid.height < clip.y);
                     while let Some(block) = blocks.get(shown) {
@@ -875,15 +1197,27 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
             }
         }
         chat.laid = range;
-        if first > 0 || offset > 0.0 || next < chat.cards.len() {
-            let thumb = (area.h * (next - first) as f32 / chat.cards.len() as f32)
-                .max(18.0)
-                .min(area.h);
-            let fraction = if chat.anchor.is_none() {
+        let at_bottom = next == chat.cards.len() && y <= area.bottom() + 1.0;
+        let before = chat
+            .cards
+            .iter()
+            .take(first)
+            .map(|card| card.height)
+            .sum::<f32>();
+        let position = before + offset;
+        let total = position + y - area.y
+            + chat
+                .cards
+                .iter()
+                .skip(next)
+                .map(|card| card.height)
+                .sum::<f32>();
+        if total > area.h {
+            let thumb = (area.h * area.h / total).max(18.0).min(area.h);
+            let fraction = if at_bottom {
                 1.0
             } else {
-                let position = first as f32 + offset / chat.cards[first].height;
-                (position / chat.bottom(area.h).0.max(1) as f32).min(1.0)
+                (position / (total - area.h)).clamp(0.0, 1.0)
             };
             let y = area.y + (area.h - thumb) * fraction;
             frame.rect_clipped(
@@ -909,7 +1243,7 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
             .button(button, label, Hit::Older, true, enabled);
             hits.splice(0..0, overlay);
         }
-        if chat.anchor.is_some() {
+        if !at_bottom {
             let label = if chat.unread {
                 t!("agent-unread")
             } else {
@@ -929,6 +1263,104 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
     }
     panel.hits = hits;
     panel.text_hits = text.hits;
+}
+
+fn draw_tool_heading(
+    actions: &mut Actions<'_, '_, '_>,
+    card: &Card,
+    ordinal: usize,
+    row: Rect,
+    clip: Rect,
+    label: &str,
+) {
+    let app = actions.app;
+    let frame = &mut actions.frame;
+    let p = app.palette;
+    let hit = row.intersect(clip);
+    if hit.w <= 0.0 || hit.h <= 0.0 {
+        return;
+    }
+    let (x, y) = app.mouse();
+    draw_button(frame, p, row, clip, hit.contains(x, y), false);
+    let right = row.right() - 10.0;
+    icons::chevron(
+        frame,
+        (right, center(row).1),
+        7.0,
+        if card.expanded {
+            icons::Direction::Down
+        } else {
+            icons::Direction::Right
+        },
+        p.text_muted,
+        hit,
+    );
+    let mut end = right - 10.0;
+    if card.item.kind == ItemKind::FileChange
+        && !card.item.files.is_empty()
+        && card.item.files.len() == card.item.file_stats.len()
+    {
+        let mut stats = card.item.file_stats.iter();
+        let totals = stats.try_fold((0usize, 0usize), |(added, removed), stat| {
+            let stat = (*stat)?;
+            Some((
+                added.saturating_add(stat.added),
+                removed.saturating_add(stat.removed),
+            ))
+        });
+        if let Some((added, removed)) = totals {
+            for (count, sign, color) in [(added, '+', p.git_added), (removed, '−', p.git_deleted)]
+            {
+                if count == 0 {
+                    continue;
+                }
+                let text = format!("{sign}{count}");
+                let w = frame
+                    .measure(FontKind::Ui, app.fonts.ui_small, &text)
+                    .ceil()
+                    + SIDEBAR_GAP;
+                if end - w < row.x + row.w * 0.45 {
+                    break;
+                }
+                let badge = Rect::new(end - w, row.y + 3.0, w, row.h - 6.0);
+                frame.rect_clipped(badge, color.alpha(0.13), RADIUS_ROW, hit);
+                ui_text_small(frame, app, badge.x + 4.0, badge, &text, color, hit);
+                end = badge.x - SIDEBAR_LIST_GAP;
+            }
+        }
+    }
+    let glyph = (row.x + 11.0, center(row).1);
+    match card.item.status.as_str() {
+        "completed" => icons::done(frame, glyph, p.git_added, hit),
+        "failed" => icons::error(frame, glyph, p.error, hit),
+        _ if !card.done => {
+            icons::refresh_turned(
+                frame,
+                glyph,
+                icons::spin_turn() * RUNNING_SPIN_SCALE,
+                p.accent,
+                hit,
+            );
+        }
+        _ => frame.rect_clipped(
+            Rect::new(glyph.0 - 2.0, glyph.1 - 2.0, 4.0, 4.0),
+            p.text_dim,
+            2.0,
+            hit,
+        ),
+    }
+    let text = Rect::new(row.x + 23.0, row.y, (end - row.x - 23.0).max(0.0), row.h);
+    let label = truncate_end(frame, label, app.fonts.ui_small, text.w);
+    ui_text_small(
+        frame,
+        app,
+        text.x,
+        text,
+        &label,
+        p.text_muted,
+        text.intersect(hit),
+    );
+    actions.hits.push((hit, Hit::Expand(ordinal)));
 }
 
 pub(crate) struct CardLayout {
@@ -1020,6 +1452,28 @@ fn wrap_lines(
         .collect()
 }
 
+fn compact_tool_card(card: &Card) -> bool {
+    !card.expanded
+        && matches!(
+            card.item.kind,
+            ItemKind::Command
+                | ItemKind::Read
+                | ItemKind::Search
+                | ItemKind::Test
+                | ItemKind::Subagent
+                | ItemKind::FileChange
+                | ItemKind::Tool
+        )
+}
+
+fn content_top(kind: ItemKind) -> f32 {
+    if kind == ItemKind::User {
+        USER_MESSAGE_PAD_Y
+    } else {
+        CONTENT_TOP
+    }
+}
+
 fn layout_card(frame: &mut Frame<'_>, app: &App, card: &mut Card, width: f32) {
     let layout = card.layout.as_ref();
     let same_geometry = layout.is_some_and(|layout| {
@@ -1031,8 +1485,8 @@ fn layout_card(frame: &mut Frame<'_>, app: &App, card: &mut Card, width: f32) {
     {
         return;
     }
-    let content_width = (width - 14.0).max(4.0);
-    let compact = matches!(card.item.kind, ItemKind::Read | ItemKind::Search) && !card.expanded;
+    let content_width = (width - 2.0 * CARD_PAD).max(4.0);
+    let compact = compact_tool_card(card);
     let body = if compact {
         Body::Lines(Vec::new())
     } else if card.item.kind == ItemKind::Message {
@@ -1083,7 +1537,14 @@ fn layout_card(frame: &mut Frame<'_>, app: &App, card: &mut Card, width: f32) {
         }
         Body::Lines(lines)
     };
-    card.height = (if compact { 25.0 } else { 30.0 })
+    card.height = TREE_ROW
+        + if compact {
+            BUTTON_GAP
+        } else if card.item.kind == ItemKind::User {
+            2.0 * USER_MESSAGE_PAD_Y + CARD_GAP
+        } else {
+            CONTENT_TOP + SIDEBAR_LIST_GAP + CARD_GAP
+        }
         + match &body {
             Body::Lines(lines) => lines.len() as f32 * ROW,
             Body::Markdown(blocks) => blocks.last().map_or(0.0, |b| b.top + b.laid.height),
@@ -1113,7 +1574,7 @@ fn layout_markdown(
         frame,
         base: app.fonts.ui,
         token: &|kind| p.token(kind),
-        surface: p.sidebar_bg,
+        surface: p.editor_bg,
         accent: p.accent,
         colors: Colors::new(p.text, p.text_muted, p.accent, p.dark),
         dark: p.dark,
@@ -1447,56 +1908,52 @@ struct Actions<'app, 'frame, 'target> {
 }
 
 impl Actions<'_, '_, '_> {
-    fn button(&mut self, area: Rect, label: &str, hit: Hit, primary: bool, enabled: bool) {
+    fn button(&mut self, area: Rect, label: &str, hit: Hit, emphasized: bool, enabled: bool) {
         if area.w <= 0.0 || area.h <= 0.0 {
             return;
         }
         let left = matches!(
             hit,
-            Hit::Expand(_) | Hit::Open(_, false) | Hit::ChooseSession(_) | Hit::Complete(_)
+            Hit::Expand(_)
+                | Hit::Open(_, false)
+                | Hit::ChooseSession(_)
+                | Hit::ChooseModel(_)
+                | Hit::ChooseEffort(_)
+                | Hit::Complete(_)
         );
-        paint_button(self.app, self.frame, area, label, primary, enabled, left);
+        let p = self.app.palette;
+        let (x, y) = self.app.mouse();
+        let hovered = enabled && area.contains(x, y);
+        if emphasized && !left || matches!(hit, Hit::Decide(..)) {
+            let role = if emphasized {
+                ButtonRole::Primary
+            } else {
+                ButtonRole::Normal
+            };
+            let label = ellipsize(
+                self.frame,
+                label,
+                self.app.fonts.ui,
+                (area.w - 2.0 * SIDEBAR_LIST_GAP).max(0.0),
+            );
+            draw_action_button(self.app, self.frame, area, &label, role, enabled, hovered);
+        } else {
+            draw_button(self.frame, p, area, area, hovered, emphasized);
+            let text = area.inset(SIDEBAR_LIST_GAP, 0.0);
+            let label = ellipsize(self.frame, label, self.app.fonts.ui_small, text.w);
+            let at = if left {
+                text.x
+            } else {
+                let width = self
+                    .frame
+                    .measure(FontKind::Ui, self.app.fonts.ui_small, &label);
+                (center(area).0 - width / 2.0).round()
+            };
+            let color = if enabled { p.text } else { p.text_dim };
+            ui_text_small(self.frame, self.app, at, area, &label, color, text);
+        }
         if enabled {
             self.hits.push((area, hit));
         }
     }
-}
-
-fn paint_button(
-    app: &App,
-    frame: &mut Frame<'_>,
-    area: Rect,
-    label: &str,
-    primary: bool,
-    enabled: bool,
-    left: bool,
-) {
-    let p = app.palette;
-    let (x, y) = app.mouse();
-    let fill = if primary && enabled {
-        p.accent_fill
-    } else if area.contains(x, y) && enabled {
-        p.hover
-    } else {
-        p.text.alpha(0.0)
-    };
-    let color = if !enabled {
-        p.text_dim
-    } else if primary {
-        p.text_on_accent
-    } else {
-        p.text
-    };
-    if fill.a > 0.0 {
-        frame.rect_clipped(area, fill, 6.0, area);
-    }
-    let label = ellipsize(frame, label, app.fonts.ui_small, (area.w - 10.0).max(0.0));
-    let width = frame.measure(FontKind::Ui, app.fonts.ui_small, &label);
-    let inset = if left {
-        6.0
-    } else {
-        ((area.w - width) / 2.0).max(4.0)
-    };
-    let x = area.x + inset;
-    ui_text_small(frame, app, x, area, &label, color, area.inset(3.0, 0.0));
 }

@@ -22,6 +22,8 @@ const MAX_FRAME: usize = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const BATCH_INTERVAL: Duration = Duration::from_millis(12);
 const MAX_PENDING: usize = 64;
+#[cfg(target_os = "macos")]
+const MACOS_BIN_DIRS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 
 type Job = (u64, Command);
 
@@ -177,6 +179,15 @@ fn supervise(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    #[cfg(target_os = "macos")]
+    {
+        // The npm launcher uses /usr/bin/env node, even when Codex is found by absolute path.
+        let path = std::env::var_os("PATH");
+        let dirs = path.iter().flat_map(std::env::split_paths);
+        let path = std::env::join_paths(dirs.chain(MACOS_BIN_DIRS.map(PathBuf::from)))
+            .map_err(|_| Failure::Start)?;
+        process.env("PATH", path);
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -342,7 +353,7 @@ fn codex_path(configured: Option<PathBuf>) -> Result<PathBuf, Failure> {
     let path = std::env::var_os("PATH").unwrap_or_default();
     let locations = std::env::split_paths(&path).filter(|path| path.is_absolute());
     #[cfg(target_os = "macos")]
-    let locations = locations.chain(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    let locations = locations.chain(MACOS_BIN_DIRS.map(PathBuf::from));
     locations
         .map(|dir| dir.join(name))
         .find(|path| path.is_file())

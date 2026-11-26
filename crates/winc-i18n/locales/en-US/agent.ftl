@@ -26,6 +26,7 @@ agent-hidden-approval = Codex is waiting for approval. Reopen the panel to revie
 agent-project-changed = This Codex connection belongs to a different project.
 agent-placeholder = Message Codex
 agent-send = Send
+agent-elapsed = Elapsed { $duration }
 agent-stop = Stop
 agent-approve-command = Review command
 agent-approve-files = Review file changes

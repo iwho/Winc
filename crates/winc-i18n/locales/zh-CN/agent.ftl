@@ -26,6 +26,7 @@ agent-hidden-approval = Codex 正在等待审批。请重新打开面板查看�
 agent-project-changed = 此 Codex 连接属于另一个项目。
 agent-placeholder = 给 Codex 发消息
 agent-send = 发送
+agent-elapsed = 已用时 { $duration }
 agent-stop = 停止
 agent-approve-command = 审批命令
 agent-approve-files = 审批文件修改

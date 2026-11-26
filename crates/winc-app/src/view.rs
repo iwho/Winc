@@ -171,10 +171,10 @@ pub fn draw(app: &mut App, frame: &mut Frame<'_>) {
         round_editor_corners(app, frame);
     }
     terminal::draw_terminal(app, frame);
+    agent::draw(app, frame);
     // 侧栏开关和窗口按钮画在终端之上：面板在右边、最大化且侧栏收起时伸到它们下面。
     draw_sidebar_button(app, frame);
     draw_window_controls(app, frame);
-    agent::draw(app, frame);
     draw_status(app, frame);
     draw_island_corners(app, frame, !covered);
     // 以下都是浮在内容之上的面板、菜单和提示，底色保持不透明。
@@ -300,7 +300,7 @@ fn draw_modal(app: &mut App, frame: &mut Frame<'_>) {
     alert::draw(app, frame);
 }
 
-/// 把侧栏、编辑区（以及终端面板）的四角改为圆角。
+/// 把侧栏、编辑区和右侧面板的四角改为圆角。
 ///
 /// 卡片内容按直角矩形绘制，最后用窗口底色覆盖四角圆弧外侧的部分；之后绘制的浮层不受影响。
 /// `editor` 为假时不修整编辑区：终端面板正盖在它上面，它的圆角已在面板之前修整过。

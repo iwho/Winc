@@ -1,6 +1,7 @@
 //! Window-owned state and event handling for the native Codex panel.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
 mod composer;
 mod editor;
@@ -17,6 +18,8 @@ use winc_i18n::t;
 
 use super::*;
 
+const MIN_WIDTH: f32 = 240.0;
+const MAX_WIDTH: f32 = 800.0;
 const MAX_CARDS: usize = 10_000;
 const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
 const ESTIMATED_HEIGHT: f32 = 52.0;
@@ -27,6 +30,7 @@ pub(crate) struct Card {
     pub(crate) turn: TurnKey,
     pub(crate) item: Item,
     pub(crate) done: bool,
+    pub(crate) message_time: Option<(i32, i32)>,
     pub(crate) expanded: bool,
     pub(crate) height: f32,
     pub(crate) dirty: bool,
@@ -39,6 +43,7 @@ impl Card {
             turn,
             item,
             done,
+            message_time: None,
             expanded: false,
             height: ESTIMATED_HEIGHT,
             dirty: true,
@@ -205,6 +210,10 @@ impl Transcript {
             }
         };
         let card = &mut self.cards[ordinal - self.first];
+        if card.message_time.is_none() && matches!(kind, ItemKind::User | ItemKind::Message) {
+            let (_, _, _, hour, minute, _) = crate::system::local_time();
+            card.message_time = Some((hour, minute));
+        }
         self.bytes -= card.item.text.len() + card.item.output.len();
         update(card);
         self.bytes += card.item.text.len() + card.item.output.len();
@@ -259,10 +268,16 @@ impl Transcript {
     }
 }
 
+enum TurnTiming {
+    Running(Instant),
+    Finished(Duration),
+}
+
 struct Conversation {
     session: Session,
     transcript: Transcript,
     running: Option<TurnKey>,
+    timing: Option<TurnTiming>,
     send_request: Option<Submission>,
     stop_request: Option<u64>,
     status: Option<TurnStatus>,
@@ -285,6 +300,7 @@ impl Conversation {
             session,
             transcript: Transcript::default(),
             running: None,
+            timing: None,
             send_request: None,
             stop_request: None,
             status: None,
@@ -299,6 +315,12 @@ impl Conversation {
             finished: None,
             changes: BTreeMap::new(),
             change_turn: None,
+        }
+    }
+
+    fn finish_timing(&mut self) {
+        if let Some(TurnTiming::Running(start)) = self.timing {
+            self.timing = Some(TurnTiming::Finished(start.elapsed()));
         }
     }
 }
@@ -371,6 +393,7 @@ pub(crate) struct Panel {
     selected: Option<String>,
     opening: Option<(u64, bool)>,
     approvals: Vec<Approval>,
+    timer_wake: Option<Instant>,
 }
 
 impl Panel {
@@ -378,7 +401,7 @@ impl Panel {
         Self {
             shown: true,
             rects: PanelRects::default(),
-            width: 390.0,
+            width: MAX_WIDTH,
             field: TextField::multiline(),
             completion: composer::Completion::default(),
             connection: Connection::Unavailable,
@@ -402,6 +425,7 @@ impl Panel {
             selected: None,
             opening: None,
             approvals: Vec::new(),
+            timer_wake: None,
         }
     }
 
@@ -430,6 +454,13 @@ impl Panel {
     pub(crate) fn busy(&self) -> bool {
         self.current()
             .is_some_and(|s| s.running.is_some() || s.send_request.is_some())
+    }
+
+    pub(crate) fn turn_elapsed(&self) -> Option<Duration> {
+        match self.current()?.timing.as_ref()? {
+            TurnTiming::Running(start) => Some(start.elapsed()),
+            TurnTiming::Finished(elapsed) => Some(*elapsed),
+        }
     }
 
     pub(crate) fn any_active(&self) -> bool {
@@ -625,7 +656,11 @@ impl Panel {
             }
         };
         if let Some(id) = self.submit(command) {
-            self.current_mut().expect("selected session").send_request = Some(Submission {
+            let session = self.current_mut().expect("selected session");
+            if !steer {
+                session.timing = None;
+            }
+            session.send_request = Some(Submission {
                 id,
                 steer,
                 text,
@@ -701,6 +736,7 @@ impl Panel {
                     if session.running.take().is_some() || session.send_request.take().is_some() {
                         session.status = Some(TurnStatus::Failed);
                     }
+                    session.finish_timing();
                     session.send_request = None;
                     session.stop_request = None;
                 }
@@ -752,6 +788,9 @@ impl Panel {
                     conversation.change_turn = None;
                     let root = self.root.as_deref();
                     let last_turn = history.last().map(|turn| turn.key.clone());
+                    if last_turn != conversation.finished {
+                        conversation.timing = None;
+                    }
                     for turn in history {
                         for item in turn.items {
                             if Some(&turn.key) == last_turn.as_ref()
@@ -804,6 +843,11 @@ impl Panel {
                         session.change_turn = Some(turn.clone());
                         session.changes.clear();
                     }
+                    if session.running.as_ref() != Some(&turn)
+                        || !matches!(session.timing, Some(TurnTiming::Running(_)))
+                    {
+                        session.timing = Some(TurnTiming::Running(Instant::now()));
+                    }
                     session.running = Some(turn);
                     session.status = Some(TurnStatus::Running);
                 }
@@ -815,6 +859,9 @@ impl Panel {
                         .as_ref()
                         .is_none_or(|running| running == &turn)
                 {
+                    if session.running.as_ref() == Some(&turn) {
+                        session.finish_timing();
+                    }
                     session.running = None;
                     let terminal = match status {
                         TurnStatus::Completed => "completed",
@@ -1101,6 +1148,26 @@ impl App {
         }
     }
 
+    pub(super) fn agent_timer_tick(&mut self, now: Instant) -> Option<Instant> {
+        let panel = self.agent.as_mut()?;
+        if !panel.shown || !panel.busy() {
+            panel.timer_wake = None;
+            return None;
+        }
+        if let Some(wake) = panel.timer_wake
+            && now < wake
+        {
+            return Some(wake);
+        }
+        let next = now + Duration::from_millis(33);
+        let redraw = panel.timer_wake.is_some();
+        panel.timer_wake = Some(next);
+        if redraw {
+            self.request_redraw();
+        }
+        Some(next)
+    }
+
     pub(super) fn poll_agent(&mut self) {
         let Some(panel) = &mut self.agent else { return };
         let Some(provider) = &mut panel.provider else {
@@ -1167,6 +1234,16 @@ impl App {
             .map_or(PanelRects::default(), |panel| panel.rects)
     }
 
+    pub(super) fn agent_caption_controls(&self) -> impl Iterator<Item = Rect> + '_ {
+        self.agent
+            .iter()
+            .filter(|panel| panel.shown && panel.rects.body.w > 0.0)
+            .flat_map(|panel| {
+                std::iter::once(panel.rects.divider).chain(panel.hits.iter().map(|(rect, _)| *rect))
+            })
+            .filter(|rect| rect.y < TOP_BAR_END)
+    }
+
     pub(super) fn layout_agent(&mut self) {
         let Some(panel) = self.agent.as_mut().filter(|panel| panel.shown) else {
             return;
@@ -1182,9 +1259,17 @@ impl App {
             .min((layout.editor.w - 160.0).max(layout.editor.w * 0.45))
             .round();
         let left = right - w;
-        panel.rects.body = Rect::new(left, layout.editor.y, w, layout.editor.h);
-        panel.rects.divider = Rect::new(left - 6.0, layout.editor.y, 8.0, layout.editor.h);
-        let end = left - 6.0;
+        let end = left - ISLAND_GAP;
+        let top = layout.window.y;
+        let height = layout.editor.bottom() - top;
+        panel.rects.body = Rect::new(left, top, w, height);
+        let divider_top = layout.top_bar.y;
+        panel.rects.divider = Rect::new(
+            end,
+            divider_top,
+            ISLAND_GAP,
+            layout.editor.bottom() - divider_top,
+        );
         layout.editor.w = (end - layout.editor.x).max(0.0);
         layout.top_bar.w = (end - layout.top_bar.x).max(0.0);
         layout.tabs.w = layout.tabs.w.min((end - 8.0 - layout.tabs.x).max(0.0));
@@ -1207,7 +1292,10 @@ impl App {
             };
             return true;
         }
-        if !self.agent_rects().body.contains(x, y) {
+        if !rects.body.contains(x, y)
+            || self.window_control_at(x, y).is_some()
+            || self.resize_edge_at(x, y).is_some()
+        {
             return false;
         }
         let Some(panel) = &mut self.agent else {
@@ -1236,7 +1324,7 @@ impl App {
                 Hit::Complete(index) => self.agent_complete(index),
                 Hit::Stop => panel.stop(),
                 Hit::Retry => {
-                    if !panel.any_active() {
+                    if panel.connection != Connection::Connecting && !panel.any_active() {
                         self.connect_agent();
                     }
                 }
@@ -1290,6 +1378,8 @@ impl App {
                     panel.submit(Command::Approve { approval, decision });
                 }
             }
+        } else if y < TOP_BAR_END {
+            return false;
         } else if let Some(hit) = panel.text_hits.iter().find(|hit| hit.rect.contains(x, y)) {
             let point = hit.position(x);
             panel.selection = Some(TextSelection {
@@ -1357,7 +1447,7 @@ impl App {
 
     pub(in crate::app) fn resize_agent(&mut self, x: f32, grab: f32) {
         if let Some(panel) = &mut self.agent {
-            panel.width = (panel.rects.body.right() - x + grab).clamp(240.0, 750.0);
+            panel.width = (panel.rects.body.right() - x + grab).clamp(MIN_WIDTH, MAX_WIDTH);
             self.relayout();
             self.request_redraw();
         }
@@ -1417,6 +1507,16 @@ mod tests {
             )
             .into(),
         ));
+        paint(&mut app);
+        let panel = app.agent.as_ref().unwrap();
+        assert!(
+            !panel
+                .hits
+                .iter()
+                .any(|(_, hit)| matches!(hit, Hit::CopyMessage(_)))
+        );
+        app.pointer.cursor_inside = true;
+        app.pointer.mouse = (panel.viewport.x + 10.0, panel.viewport.y + 10.0);
         paint(&mut app);
         let panel = app.agent.as_mut().unwrap();
         assert!(
@@ -1510,6 +1610,165 @@ mod tests {
             ));
         }
         (app, key)
+    }
+
+    #[test]
+    fn turn_timer_ticks_until_completion_without_restarting_on_duplicate_start() {
+        let (mut app, turn) = test_panel(0);
+        let panel = app.agent.as_mut().unwrap();
+        assert!(panel.turn_elapsed().is_none());
+        panel.event(Event::TurnStarted(None, turn.clone()));
+        let start = Instant::now() - Duration::from_secs(7);
+        panel.current_mut().unwrap().timing = Some(TurnTiming::Running(start));
+        panel.event(Event::TurnStarted(Some(42), turn.clone()));
+        assert!(panel.turn_elapsed().unwrap() >= Duration::from_secs(7));
+        assert_eq!(
+            app.agent_timer_tick(start + Duration::from_secs(7)),
+            Some(start + Duration::from_millis(7033))
+        );
+        assert_eq!(
+            app.agent_timer_tick(start + Duration::from_secs(8)),
+            Some(start + Duration::from_millis(8033))
+        );
+
+        let panel = app.agent.as_mut().unwrap();
+        panel.event(Event::TurnEnded(turn, TurnStatus::Completed));
+        assert!(matches!(
+            panel.current().unwrap().timing,
+            Some(TurnTiming::Finished(elapsed)) if elapsed >= Duration::from_secs(7)
+        ));
+        assert_eq!(app.agent_timer_tick(Instant::now()), None);
+    }
+
+    #[test]
+    fn agent_running_layout_keeps_stop_above_the_composer() {
+        let (mut app, turn) = test_panel(0);
+        app.palette = Palette::for_dark(true);
+        let panel = app.agent.as_mut().unwrap();
+        panel.catalog.models.push(winc_agent::Model {
+            id: "gpt-6.2-sol".into(),
+            name: "GPT-6.2-Sol".into(),
+            efforts: vec!["low".into()],
+            default_effort: Some("low".into()),
+            is_default: true,
+        });
+        panel.event(Event::TurnStarted(None, turn.clone()));
+        panel.event(Event::Tokens(turn.clone(), 311_887, 82_938, Some(475_000)));
+        let (_, fraction) = panel.token_summary().unwrap();
+        assert_eq!(fraction, Some(82_938.0 / 475_000.0));
+        for (id, kind, message, done) in [
+            ("prompt", ItemKind::User, "整理 Codex 侧边栏的布局", true),
+            (
+                "response",
+                ItemKind::Message,
+                "我会调整模型选择、工具卡片和输入框的位置。",
+                true,
+            ),
+            (
+                "command",
+                ItemKind::Command,
+                "cargo test -p winc-app --lib agent",
+                true,
+            ),
+            (
+                "file",
+                ItemKind::FileChange,
+                "crates/winc-app/src/view/agent.rs",
+                false,
+            ),
+        ] {
+            let is_file = kind == ItemKind::FileChange;
+            panel.event(Event::Item(
+                turn.clone(),
+                Item {
+                    id: id.into(),
+                    kind,
+                    text: message.into(),
+                    output: String::new(),
+                    status: if done { "completed" } else { "inProgress" }.into(),
+                    files: is_file
+                        .then(|| PathBuf::from(message))
+                        .into_iter()
+                        .collect(),
+                    file_stats: is_file
+                        .then_some(Some(LineChanges {
+                            added: 42,
+                            removed: 18,
+                        }))
+                        .into_iter()
+                        .collect(),
+                },
+                done,
+            ));
+        }
+        panel.field.set_text("再确认一下窄侧栏的布局");
+        for width in [240.0, 520.0] {
+            app.agent.as_mut().unwrap().width = width;
+            if std::env::var_os("WINC_SNAPSHOT_DIR").is_some() {
+                crate::app::snapshot::shoot(&mut app, &format!("codex-running-{width}"));
+            } else {
+                paint(&mut app);
+            }
+            let panel = app.agent.as_ref().unwrap();
+            let stop = panel
+                .hits
+                .iter()
+                .find_map(|(rect, hit)| matches!(hit, Hit::Stop).then_some(rect))
+                .unwrap();
+            let send = panel
+                .hits
+                .iter()
+                .find_map(|(rect, hit)| matches!(hit, Hit::Send).then_some(rect))
+                .unwrap();
+            assert!(panel.viewport.bottom() <= stop.y);
+            assert!(stop.bottom() < panel.field.view.area.y);
+            assert!(send.y >= panel.field.view.area.bottom());
+        }
+        app.agent
+            .as_mut()
+            .unwrap()
+            .event(Event::TurnEnded(turn, TurnStatus::Completed));
+        paint(&mut app);
+        let panel = app.agent.as_ref().unwrap();
+        assert!(panel.turn_elapsed().is_some());
+        assert!(!panel.hits.iter().any(|(_, hit)| matches!(hit, Hit::Stop)));
+    }
+
+    #[test]
+    fn return_to_bottom_uses_the_rendered_end_of_a_long_message() {
+        let (mut app, key) = test_panel(0);
+        app.agent.as_mut().unwrap().event(Event::Delta(
+            key,
+            "long".into(),
+            DeltaKind::Message,
+            "- A line to scroll\n".repeat(300),
+        ));
+        paint(&mut app);
+        let panel = app.agent.as_mut().unwrap();
+        let height = panel.viewport.h;
+        let chat = panel.transcript().unwrap();
+        let (row, offset) = chat.bottom(height);
+        assert_eq!(row, 0);
+        assert!(offset > 120.0);
+        chat.anchor = Some((chat.first, offset));
+        paint(&mut app);
+        let has_button = |app: &App| {
+            app.agent
+                .as_ref()
+                .unwrap()
+                .hits
+                .iter()
+                .any(|(_, hit)| matches!(hit, Hit::Follow))
+        };
+        assert!(!has_button(&app));
+
+        let area = app.agent.as_ref().unwrap().viewport;
+        assert!(app.scroll_agent(area.x + 5.0, area.y + 5.0, -120.0));
+        paint(&mut app);
+        assert!(has_button(&app));
+        assert!(app.scroll_agent(area.x + 5.0, area.y + 5.0, 120.0));
+        paint(&mut app);
+        assert!(!has_button(&app));
     }
 
     #[test]

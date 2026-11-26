@@ -78,9 +78,13 @@ impl Panel {
                 .is_some_and(|session| session.running.is_some())
     }
 
-    pub(crate) fn token_label(&self) -> Option<String> {
+    pub(crate) fn token_summary(&self) -> Option<(String, Option<f32>)> {
         let (total, last, window) = self.current()?.tokens;
-        (total > 0).then(|| match window {
+        if total == 0 {
+            return None;
+        }
+        let window = window.filter(|&window| window > 0);
+        let label = match window {
             Some(window) => t!(
                 "agent-tokens-window",
                 total = total as f64,
@@ -88,7 +92,10 @@ impl Panel {
                 window = window as f64
             ),
             None => t!("agent-tokens", total = total as f64, last = last as f64),
-        })
+        };
+        // Total is cumulative across requests. The latest request reflects context usage.
+        let fraction = window.map(|window| (last as f64 / window as f64).min(1.0) as f32);
+        Some((label, fraction))
     }
 
     pub(crate) fn writer_count(&self) -> usize {

@@ -30,8 +30,14 @@ impl App {
 
     /// 处理光标离开窗口：清除悬停状态，并解除标签宽度的锁定。
     pub(crate) fn cursor_left(&mut self) {
+        let (x, y) = self.pointer.mouse;
         self.pointer.cursor_inside = false;
-        if self.tabs.width_lock.take().is_some() {
+        if self.tabs.width_lock.take().is_some()
+            || self
+                .agent
+                .as_ref()
+                .is_some_and(|panel| panel.shown && panel.viewport.contains(x, y))
+        {
             self.request_redraw();
         }
         self.set_hover(Hover::None);

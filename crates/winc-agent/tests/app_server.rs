@@ -249,10 +249,11 @@ fn an_exiting_server_reports_disconnect_and_can_be_replaced() {
     let script = root.join("codex");
     fs::write(&script, "#!/bin/sh\nread -r request\nexit 1\n").unwrap();
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
-    for _ in 0..2 {
+    let timeout = Duration::from_secs(5);
+    {
         let mut provider =
             CodexProvider::connect(root.clone(), Some(script.clone()), || {}).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + timeout;
         loop {
             if provider
                 .drain()
@@ -265,5 +266,16 @@ fn an_exiting_server_reports_disconnect_and_can_be_replaced() {
             thread::sleep(Duration::from_millis(15));
         }
     }
+    fs::write(&script, include_str!("mock-app-server.sh")).unwrap();
+    let mut provider = CodexProvider::connect(root.clone(), Some(script), || {}).unwrap();
+    wait(&mut provider, timeout, |event| {
+        matches!(
+            event,
+            Event::Ready {
+                login_required: false
+            }
+        )
+    });
+    drop(provider);
     fs::remove_dir_all(root).unwrap();
 }
