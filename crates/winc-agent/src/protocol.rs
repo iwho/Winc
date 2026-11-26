@@ -18,6 +18,34 @@ pub(super) fn append(text: &mut String, value: &str, limit: usize) {
     text.push_str(crate::prefix(value, limit.saturating_sub(text.len())));
 }
 
+fn turn_input(text: String, image: Option<&[u8]>) -> Vec<Value> {
+    let mut input = Vec::new();
+    if !text.is_empty() || image.is_none() {
+        input.push(json!({"type": "text", "text": text, "text_elements": []}));
+    }
+    if let Some(image) = image {
+        const BASE64: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut url = String::with_capacity(22 + image.len().div_ceil(3) * 4);
+        url.push_str("data:image/png;base64,");
+        for chunk in image.chunks(3) {
+            let bits = chunk
+                .iter()
+                .fold(0_u32, |bits, &byte| bits << 8 | u32::from(byte))
+                << (8 * (3 - chunk.len()));
+            for index in 0..4 {
+                url.push(if index <= chunk.len() {
+                    char::from(BASE64[((bits >> (18 - index * 6)) & 63) as usize])
+                } else {
+                    '='
+                });
+            }
+        }
+        input.push(json!({"type": "image", "url": url}));
+    }
+    input
+}
+
 fn bounded(value: &str, limit: usize) -> String {
     crate::prefix(value, limit).to_owned()
 }
@@ -314,6 +342,7 @@ impl Protocol {
             Command::Send {
                 session,
                 text,
+                image,
                 model,
                 effort,
             } if self.loaded.contains(&session) => (
@@ -322,15 +351,15 @@ impl Protocol {
                     "threadId": session, "cwd": root, "model": model, "effort": effort,
                     "approvalPolicy": "on-request", "approvalsReviewer": "user",
                     "sandboxPolicy": {"type": "workspaceWrite", "networkAccess": false},
-                    "input": [{"type": "text", "text": text, "text_elements": []}],
+                    "input": turn_input(text, image.as_deref()),
                 }),
                 Reply::Send(session),
             ),
-            Command::Steer { turn, text } if self.loaded.contains(&turn.session) => (
+            Command::Steer { turn, text, image } if self.loaded.contains(&turn.session) => (
                 "turn/steer",
                 json!({
                     "threadId": turn.session, "expectedTurnId": turn.turn,
-                    "input": [{"type": "text", "text": text, "text_elements": []}],
+                    "input": turn_input(text, image.as_deref()),
                 }),
                 Reply::Steer(turn),
             ),
@@ -925,5 +954,14 @@ mod tests {
                 removed: 0
             })
         );
+    }
+
+    #[test]
+    fn turn_input_includes_png_as_an_image() {
+        let input = turn_input("Describe this".into(), Some(&[0x89, b'P', b'N', b'G']));
+        assert_eq!(input[0]["text"], "Describe this");
+        assert_eq!(input[1]["type"], "image");
+        assert_eq!(input[1]["url"], "data:image/png;base64,iVBORw==");
+        assert_eq!(turn_input(String::new(), Some(&[0])).len(), 1);
     }
 }

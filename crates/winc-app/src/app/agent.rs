@@ -52,11 +52,17 @@ impl Card {
     }
 }
 
+pub(crate) struct DraftImage {
+    png: std::sync::Arc<[u8]>,
+    pub(crate) preview: winc_preview::image::Pixels,
+}
+
 struct Submission {
     id: u64,
     steer: bool,
     text: String,
     attachment: Option<std::rc::Rc<editor::Attachment>>,
+    image: Option<std::rc::Rc<DraftImage>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -284,6 +290,7 @@ struct Conversation {
     tokens: (u64, u64, Option<u64>),
     draft: TextField,
     attachment: Option<std::rc::Rc<editor::Attachment>>,
+    image: Option<std::rc::Rc<DraftImage>>,
     model: Option<String>,
     effort: Option<String>,
     loaded: bool,
@@ -307,6 +314,7 @@ impl Conversation {
             tokens: (0, 0, None),
             draft: TextField::multiline(),
             attachment: None,
+            image: None,
             model: None,
             effort: None,
             loaded: true,
@@ -342,6 +350,7 @@ pub(crate) enum Hit {
     Decide(u64, ApprovalDecision),
     Attach(bool),
     Detach,
+    RemoveImage,
     Show(Tab),
     ChooseSession(String),
     ChooseModel(String),
@@ -384,6 +393,7 @@ pub(crate) struct Panel {
     pub(crate) max_scroll: f32,
     pub(crate) workspace_parallel: bool,
     pub(crate) attachment: Option<std::rc::Rc<editor::Attachment>>,
+    pub(crate) image: Option<std::rc::Rc<DraftImage>>,
     pub(crate) tab: Tab,
     catalog: Catalog,
     default_model: Option<String>,
@@ -416,6 +426,7 @@ impl Panel {
             max_scroll: 0.0,
             workspace_parallel: false,
             attachment: None,
+            image: None,
             tab: Tab::Chat,
             catalog: Catalog::default(),
             default_model: None,
@@ -480,7 +491,9 @@ impl Panel {
                 session.send_request.is_none() && session.stop_request.is_none()
             })
             && self.current().is_none_or(|session| session.loaded)
-            && (!self.field.text().trim().is_empty() || self.attachment.is_some())
+            && (!self.field.text().trim().is_empty()
+                || self.attachment.is_some()
+                || self.image.is_some())
     }
 
     pub(crate) fn can_stop(&self) -> bool {
@@ -644,13 +657,20 @@ impl Panel {
             return;
         }
         let attachment = self.attachment.clone();
+        let image = self.image.clone();
+        let png = image.as_ref().map(|image| image.png.clone());
         let steer = session.running.is_some();
         let command = if let Some(turn) = session.running.clone() {
-            Command::Steer { turn, text: prompt }
+            Command::Steer {
+                turn,
+                text: prompt,
+                image: png,
+            }
         } else {
             Command::Send {
                 session: session.session.id.clone(),
                 text: prompt,
+                image: png,
                 model: self.model().map(|model| model.id.clone()),
                 effort: self.effort().map(str::to_owned),
             }
@@ -665,6 +685,7 @@ impl Panel {
                 steer,
                 text,
                 attachment,
+                image,
             });
             self.show_tab(Tab::Chat);
         }
@@ -682,10 +703,14 @@ impl Panel {
             return;
         }
         let sent = session.send_request.take().expect("matching submission");
-        let (field, attachment) = if self.selected.as_deref() == Some(session_id) {
-            (&mut self.field, &mut self.attachment)
+        let (field, attachment, image) = if self.selected.as_deref() == Some(session_id) {
+            (&mut self.field, &mut self.attachment, &mut self.image)
         } else {
-            (&mut session.draft, &mut session.attachment)
+            (
+                &mut session.draft,
+                &mut session.attachment,
+                &mut session.image,
+            )
         };
         field.remember_text(&sent.text);
         if field.text() == sent.text {
@@ -695,6 +720,11 @@ impl Panel {
             (Some(sent), Some(current)) if std::rc::Rc::ptr_eq(sent, current))
         {
             *attachment = None;
+        }
+        if matches!((&sent.image, &*image),
+            (Some(sent), Some(current)) if std::rc::Rc::ptr_eq(sent, current))
+        {
+            *image = None;
         }
     }
 
@@ -1116,6 +1146,7 @@ impl App {
             panel.conversations.clear();
             panel.selected = None;
             panel.attachment = None;
+            panel.image = None;
             panel.default_model = None;
             panel.default_effort = None;
         }
@@ -1197,6 +1228,38 @@ impl App {
         } else if hidden_approval {
             self.flash(t!("agent-hidden-approval"));
         }
+    }
+
+    pub(super) fn paste_agent_image(&mut self) -> bool {
+        let Some(panel) = &mut self.agent else {
+            return false;
+        };
+        let Some(png) = self.clipboard.png() else {
+            return false;
+        };
+        if png.len() > 5 * 1024 * 1024 {
+            panel.error = Some(t!("agent-image-too-large").into());
+        } else {
+            match winc_preview::image::decode_bytes(&png) {
+                Ok(pixels) => {
+                    let scale = (96.0 / pixels.width.max(pixels.height) as f32).min(1.0);
+                    let width = ((pixels.width as f32 * scale).round() as u32).max(1);
+                    let height = ((pixels.height as f32 * scale).round() as u32).max(1);
+                    let preview = winc_preview::image::resize(&pixels, width, height);
+                    panel.image = Some(std::rc::Rc::new(DraftImage {
+                        png: png.into(),
+                        preview,
+                    }));
+                    if panel.error.as_deref().is_some_and(|error| {
+                        error == t!("agent-image-too-large") || error == t!("agent-image-invalid")
+                    }) {
+                        panel.error = None;
+                    }
+                }
+                Err(_) => panel.error = Some(t!("agent-image-invalid").into()),
+            }
+        }
+        true
     }
 
     pub(super) fn agent_send(&mut self) {
@@ -1362,6 +1425,7 @@ impl App {
                 }
                 Hit::Attach(selection) => self.agent_attach(selection),
                 Hit::Detach => panel.attachment = None,
+                Hit::RemoveImage => panel.image = None,
                 Hit::Show(tab) => panel.show_tab(if panel.tab == tab { Tab::Chat } else { tab }),
                 Hit::ChooseSession(id) => panel.choose(id),
                 Hit::ChooseModel(id) => panel.choose_model(id),
@@ -1473,6 +1537,24 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::snapshot::{blank_app, paint};
+
+    #[test]
+    fn pasted_image_appears_in_the_composer_and_can_be_removed() {
+        let (mut app, _) = test_panel(0);
+        app.focus = Focus::Agent;
+        app.clipboard.copied_image = winc_editor::paste::encode_png(1, 1, &[255, 0, 0, 255]);
+        app.paste();
+        paint(&mut app);
+        let panel = app.agent.as_ref().unwrap();
+        assert!(panel.image.is_some());
+        let remove = panel
+            .hits
+            .iter()
+            .find_map(|(rect, hit)| matches!(hit, Hit::RemoveImage).then_some(*rect))
+            .unwrap();
+        assert!(app.agent_click(remove.x + remove.w / 2.0, remove.y + remove.h / 2.0));
+        assert!(app.agent.as_ref().unwrap().image.is_none());
+    }
 
     #[test]
     fn renders_streamed_code_and_exposes_approval_actions() {

@@ -626,6 +626,10 @@ impl App {
     /// 焦点在输入框时插入文本；在编辑区时粘贴文件、文本或图片，在文件树中粘贴文件或图片
     /// （见 `paste` 模块）。
     pub(in crate::app) fn paste(&mut self) {
+        if self.focus == Focus::Agent && self.paste_agent_image() {
+            self.request_redraw();
+            return;
+        }
         match self.focus {
             focus if focus.is_field() => {
                 if let Some(content) = self.clipboard_text() {

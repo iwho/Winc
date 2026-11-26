@@ -84,3 +84,5 @@ agent-loading-older = 正在加载…
 agent-approval-expired = 审批已超时
 agent-empty-chat = 开始与 Codex 对话
 agent-standalone = 独立对话
+agent-image-too-large = 剪贴板图片超过 5 MiB。
+agent-image-invalid = 无法读取剪贴板图片。

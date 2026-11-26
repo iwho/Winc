@@ -211,10 +211,15 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         project_matches,
     );
     let attachment_path = panel.attachment.as_ref().map(|attached| attached.path());
+    let preview_size = input_h.min(44.0).min(composer.w * 0.3);
+    let preview_gutter = panel
+        .image
+        .as_ref()
+        .map_or(0.0, |_| preview_size + SIDEBAR_GAP);
     let field = Rect::new(
         composer.x + SIDEBAR_GAP,
         composer.y + SIDEBAR_LIST_GAP,
-        (composer.w - 2.0 * SIDEBAR_GAP).max(0.0),
+        (composer.w - 2.0 * SIDEBAR_GAP - preview_gutter).max(0.0),
         input_h,
     );
     surface(
@@ -235,6 +240,56 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             frame,
             hits: &mut panel.hits,
         };
+        if let Some(image) = &panel.image {
+            let preview = Rect::new(
+                field.right() + SIDEBAR_GAP,
+                field.y,
+                preview_size,
+                preview_size,
+            );
+            let pixels = &image.preview;
+            let scale = preview_size / pixels.width.max(pixels.height) as f32;
+            let width = pixels.width as f32 * scale;
+            let height = pixels.height as f32 * scale;
+            let fit = Rect::new(
+                preview.x + (preview.w - width) / 2.0,
+                preview.y + (preview.h - height) / 2.0,
+                width,
+                height,
+            );
+            surface(
+                actions.frame,
+                preview,
+                p.editor_bg,
+                p.border,
+                RADIUS_ROW,
+                composer,
+            );
+            actions
+                .frame
+                .pixels_scaled(fit, pixels.width, pixels.height, &pixels.rgba, preview);
+            let size = preview_size.min(18.0);
+            let remove = Rect::new(preview.right() - size, preview.y, size, size);
+            surface(
+                actions.frame,
+                remove,
+                p.group_bg,
+                p.border,
+                RADIUS_ROW,
+                composer,
+            );
+            let (x, y) = app.mouse();
+            draw_button(
+                actions.frame,
+                p,
+                remove,
+                composer,
+                remove.contains(x, y),
+                false,
+            );
+            icons::close(actions.frame, center(remove), 8.0, p.text, remove);
+            actions.hits.push((remove, Hit::RemoveImage));
+        }
         actions.button(send, send_label, Hit::Send, true, can_send);
         if can_review {
             actions.button(

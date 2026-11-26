@@ -259,11 +259,15 @@ impl Panel {
             {
                 session.draft = std::mem::replace(&mut self.field, TextField::multiline());
                 session.attachment = self.attachment.take();
+                session.image = self.image.take();
             }
             if let Some(session) = self.conversations.get_mut(&id) {
                 // The first submitted prompt starts in the unattached composer.
                 if had_selection || self.field.text().is_empty() {
                     std::mem::swap(&mut self.field, &mut session.draft);
+                }
+                if had_selection || session.image.is_some() {
+                    self.image = session.image.take();
                 }
                 if session.attachment.is_some() {
                     self.attachment = session.attachment.take();
@@ -311,6 +315,7 @@ mod tests {
             steer: false,
             text: "first prompt".into(),
             attachment: None,
+            image: None,
         });
         panel.select("second".into());
         panel.field.set_text("second draft");

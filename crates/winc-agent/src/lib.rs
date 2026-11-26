@@ -66,6 +66,8 @@ pub enum Command {
         session: String,
         /// User prompt with optional editor context.
         text: String,
+        /// Optional clipboard image, encoded as PNG.
+        image: Option<std::sync::Arc<[u8]>>,
         /// Model ID from discovery.
         model: Option<String>,
         /// Reasoning effort from the selected model.
@@ -77,6 +79,8 @@ pub enum Command {
         turn: TurnKey,
         /// Guidance and optional editor context.
         text: String,
+        /// Optional clipboard image, encoded as PNG.
+        image: Option<std::sync::Arc<[u8]>>,
     },
     /// Interrupt a specific session's active turn.
     Stop(TurnKey),

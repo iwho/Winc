@@ -57,6 +57,7 @@ fn handles_approval_and_interrupt_over_stdio() {
         .submit(Command::Send {
             session: "s".into(),
             text: "你好".into(),
+            image: None,
             model: None,
             effort: None,
         })
@@ -130,6 +131,7 @@ fn handles_approval_and_interrupt_over_stdio() {
         .submit(Command::Steer {
             turn: turn.clone(),
             text: "Continue".into(),
+            image: None,
         })
         .unwrap();
     wait(
@@ -187,6 +189,7 @@ fn live_codex_turn() {
         .submit(Command::Send {
             session: session.clone(),
             text: "Create result.txt in the current directory containing WINC_OK on its own line, and then reply WINC_OK. Only modify that file.".into(),
+            image: None,
             model,
             effort: None,
         })

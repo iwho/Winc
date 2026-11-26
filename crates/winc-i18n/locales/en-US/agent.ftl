@@ -84,3 +84,5 @@ agent-loading-older = Loading…
 agent-approval-expired = Approval expired
 agent-empty-chat = Start a conversation
 agent-standalone = Standalone chat
+agent-image-too-large = The clipboard image exceeds 5 MiB.
+agent-image-invalid = Could not read the clipboard image.
