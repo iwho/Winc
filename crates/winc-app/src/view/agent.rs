@@ -1349,7 +1349,7 @@ fn draw_tool_heading(
                 frame,
                 glyph,
                 icons::spin_turn() * RUNNING_SPIN_SCALE,
-                p.accent,
+                p.text_muted,
                 hit,
             );
         }
