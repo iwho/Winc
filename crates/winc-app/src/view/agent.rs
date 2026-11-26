@@ -16,6 +16,7 @@ const CARD_PAD: f32 = TAB_INSET;
 const CARD_GAP: f32 = SIDEBAR_GAP;
 const CONTENT_TOP: f32 = SIDEBAR_LIST_GAP;
 const USER_MESSAGE_PAD_Y: f32 = SIDEBAR_GAP;
+const MESSAGE_HEADER: f32 = 16.0;
 const STATUS_TOP_GAP: f32 = SIDEBAR_GAP + SIDEBAR_LIST_GAP;
 const RUNNING_SPIN_SCALE: f32 = 0.5;
 
@@ -611,7 +612,7 @@ fn draw_status(
     if warning {
         icons::warning(frame, glyph, p.warning, area);
     } else if panel.busy() {
-        icons::refresh_turned(
+        icons::spinner(
             frame,
             glyph,
             icons::spin_turn() * RUNNING_SPIN_SCALE,
@@ -1007,9 +1008,11 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                 card.height - if compact { BUTTON_GAP } else { CARD_GAP },
             );
             let p = app.palette;
+            let header_height = card_header_height(card.item.kind);
             match card.item.kind {
                 ItemKind::User => {
-                    let bubble = Rect::new(block.x, y + TREE_ROW, block.w, block.h - TREE_ROW);
+                    let bubble =
+                        Rect::new(block.x, y + header_height, block.w, block.h - header_height);
                     surface(
                         frame,
                         bubble,
@@ -1022,8 +1025,13 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                 ItemKind::Message => {}
                 _ => surface(frame, block, p.group_bg, p.border, RADIUS_TAB, area),
             }
-            let heading = Rect::new(block.x + CARD_PAD, y, (block.w - 62.0).max(0.0), TREE_ROW)
-                .intersect(area);
+            let heading = Rect::new(
+                block.x + CARD_PAD,
+                y,
+                (block.w - 62.0).max(0.0),
+                header_height,
+            )
+            .intersect(area);
             let name = match card.item.kind {
                 ItemKind::User => t!("agent-user"),
                 ItemKind::Message => t!("agent-title"),
@@ -1045,7 +1053,7 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
             if matches!(card.item.kind, ItemKind::Message | ItemKind::User) {
                 let (x, mouse_y) = app.mouse();
                 if app.cursor_inside() && block.intersect(area).contains(x, mouse_y) {
-                    ui_text(
+                    ui_text_small(
                         actions.frame,
                         app,
                         heading.x,
@@ -1062,7 +1070,7 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                         block.right() - CARD_PAD - BUTTON_SMALL,
                         y,
                         BUTTON_SMALL,
-                        TREE_ROW,
+                        header_height,
                     );
                     let hit = copy.intersect(area);
                     draw_button(
@@ -1082,7 +1090,7 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                         let width = actions
                             .frame
                             .measure(FontKind::Ui, app.fonts.ui_small, &label);
-                        let time = Rect::new(copy.x - BUTTON_GAP - width, y, width, TREE_ROW);
+                        let time = Rect::new(copy.x - BUTTON_GAP - width, y, width, header_height);
                         ui_text_small(
                             actions.frame,
                             app,
@@ -1123,7 +1131,7 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                 let header = Rect::new(block.x + 1.0, y, (block.w - 2.0).max(0.0), TREE_ROW);
                 draw_tool_heading(&mut actions, card, ordinal, header, area, &label);
             }
-            let row_top = y + TREE_ROW + content_top(card.item.kind);
+            let row_top = y + header_height + content_top(card.item.kind);
             let clip = Rect::new(
                 block.x,
                 row_top,
@@ -1337,7 +1345,7 @@ fn draw_tool_heading(
         "completed" => icons::done(frame, glyph, p.text_muted, hit),
         "failed" => icons::error(frame, glyph, p.error, hit),
         _ if !card.done => {
-            icons::refresh_turned(
+            icons::spinner(
                 frame,
                 glyph,
                 icons::spin_turn() * RUNNING_SPIN_SCALE,
@@ -1469,6 +1477,14 @@ fn compact_tool_card(card: &Card) -> bool {
         )
 }
 
+fn card_header_height(kind: ItemKind) -> f32 {
+    if matches!(kind, ItemKind::User | ItemKind::Message) {
+        MESSAGE_HEADER
+    } else {
+        TREE_ROW
+    }
+}
+
 fn content_top(kind: ItemKind) -> f32 {
     if kind == ItemKind::User {
         USER_MESSAGE_PAD_Y
@@ -1540,7 +1556,7 @@ fn layout_card(frame: &mut Frame<'_>, app: &App, card: &mut Card, width: f32) {
         }
         Body::Lines(lines)
     };
-    card.height = TREE_ROW
+    card.height = card_header_height(card.item.kind)
         + if compact {
             BUTTON_GAP
         } else if card.item.kind == ItemKind::User {

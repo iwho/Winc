@@ -483,6 +483,13 @@ pub fn spin_turn() -> f32 {
     start.elapsed().as_secs_f32() * crate::theme::SPIN_SPEED
 }
 
+/// Draws a rotating arc without an arrowhead.
+pub fn spinner(frame: &mut Frame<'_>, (cx, cy): (f32, f32), turn: f32, color: Color, clip: Rect) {
+    let angle = turn.rem_euclid(1.0) * 2.0 * PI - PI;
+    let arc = Stroke::Arc(cx, cy, RING, angle, angle + 1.4 * PI);
+    frame.stroke(&[arc], RING_STROKE, color, clip);
+}
+
 /// 绘制按 `turn`（圈数，可为任意实数）顺时针旋转后的「刷新」图标，表示操作正在进行。
 pub fn refresh_turned(
     frame: &mut Frame<'_>,
