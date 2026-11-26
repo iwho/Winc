@@ -1043,21 +1043,21 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                 hits: &mut hits,
             };
             if matches!(card.item.kind, ItemKind::Message | ItemKind::User) {
-                ui_text(
-                    actions.frame,
-                    app,
-                    heading.x,
-                    heading,
-                    name,
-                    if card.item.kind == ItemKind::User {
-                        p.accent
-                    } else {
-                        p.text_muted
-                    },
-                    heading,
-                );
                 let (x, mouse_y) = app.mouse();
                 if app.cursor_inside() && block.intersect(area).contains(x, mouse_y) {
+                    ui_text(
+                        actions.frame,
+                        app,
+                        heading.x,
+                        heading,
+                        name,
+                        if card.item.kind == ItemKind::User {
+                            p.accent
+                        } else {
+                            p.text_muted
+                        },
+                        heading,
+                    );
                     let copy = Rect::new(
                         block.right() - CARD_PAD - BUTTON_SMALL,
                         y,
@@ -1198,6 +1198,9 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
         }
         chat.laid = range;
         let at_bottom = next == chat.cards.len() && y <= area.bottom() + 1.0;
+        if at_bottom {
+            chat.follow();
+        }
         let before = chat
             .cards
             .iter()
@@ -1331,7 +1334,7 @@ fn draw_tool_heading(
     }
     let glyph = (row.x + 11.0, center(row).1);
     match card.item.status.as_str() {
-        "completed" => icons::done(frame, glyph, p.git_added, hit),
+        "completed" => icons::done(frame, glyph, p.text_muted, hit),
         "failed" => icons::error(frame, glyph, p.error, hit),
         _ if !card.done => {
             icons::refresh_turned(

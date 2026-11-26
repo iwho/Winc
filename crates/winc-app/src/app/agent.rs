@@ -1751,7 +1751,11 @@ mod tests {
         assert_eq!(row, 0);
         assert!(offset > 120.0);
         chat.anchor = Some((chat.first, offset));
+        chat.unread = true;
         paint(&mut app);
+        let chat = app.agent.as_mut().unwrap().transcript().unwrap();
+        assert!(chat.anchor.is_none());
+        assert!(!chat.unread);
         let has_button = |app: &App| {
             app.agent
                 .as_ref()
