@@ -172,6 +172,21 @@ pub fn external(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip:
     frame.stroke(&lines, CHEVRON_STROKE, color, clip);
 }
 
+/// 绘制中央带十字的盾牌，10×12。
+pub fn shield_plus(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip: Rect) {
+    let edges = [
+        Stroke::Line(cx, cy - 5.5, cx + 4.5, cy - 3.5),
+        Stroke::Line(cx + 4.5, cy - 3.5, cx + 4.0, cy + 1.5),
+        Stroke::Line(cx + 4.0, cy + 1.5, cx, cy + 5.5),
+        Stroke::Line(cx, cy + 5.5, cx - 4.0, cy + 1.5),
+        Stroke::Line(cx - 4.0, cy + 1.5, cx - 4.5, cy - 3.5),
+        Stroke::Line(cx - 4.5, cy - 3.5, cx, cy - 5.5),
+        Stroke::Line(cx - 1.75, cy - 0.5, cx + 1.75, cy - 0.5),
+        Stroke::Line(cx, cy - 2.25, cx, cy + 1.25),
+    ];
+    frame.stroke(&edges, GLYPH_STROKE, color, clip);
+}
+
 /// 绘制提醒图标，12×11：三角形内一个感叹号。
 pub fn warning(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip: Rect) {
     let (top, bottom, half) = (cy - 5.0, cy + 4.5, 5.5);

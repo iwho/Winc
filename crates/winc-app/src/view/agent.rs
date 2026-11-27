@@ -162,7 +162,14 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             .editor
             .active()
             .is_some_and(|doc| doc.path.is_some() && doc.holds_file_text());
-    let has_context = can_attach || panel.attachment.is_some() || panel.standalone;
+    let has_attachment = panel.attachment.is_some();
+    let show_attach = can_attach && !has_attachment;
+    let show_selection = show_attach
+        && app
+            .editor
+            .active()
+            .is_some_and(|doc| !doc.selection.is_empty());
+    let has_context = show_selection || has_attachment || panel.standalone;
     let context_h = if has_context {
         BUTTON_SMALL + SIDEBAR_LIST_GAP
     } else {
@@ -197,11 +204,25 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     let changes = Rect::new(send.x - BUTTON_GAP - change_w, footer.y, change_w, footer.h);
     let permission_label = permission_label(panel.permissions);
     let permission_end = if can_review { changes.x } else { send.x };
-    let permission = Rect::new(
-        footer.x,
+    let full_access = panel.permissions == PermissionMode::FullAccess;
+    let shield_gutter = 15.0;
+    let permission_width =
+        button_width(app, frame, permission_label) + if full_access { shield_gutter } else { 0.0 };
+    let attach_label = t!("agent-attach-file");
+    let permission_space = (permission_end - footer.x - BUTTON_GAP).max(0.0);
+    let (permission_w, attach_w) = if show_attach {
+        let available = (permission_space - BUTTON_GAP).max(0.0);
+        let attach_w = button_width(app, frame, attach_label)
+            .min((available - permission_width).max(available / 2.0));
+        (permission_width.min(available - attach_w), attach_w)
+    } else {
+        (permission_width.min(permission_space), 0.0)
+    };
+    let permission = Rect::new(footer.x, footer.y, permission_w, footer.h);
+    let attach = Rect::new(
+        permission_end - BUTTON_GAP - attach_w,
         footer.y,
-        button_width(app, frame, permission_label)
-            .min((permission_end - footer.x - BUTTON_GAP).max(0.0)),
+        attach_w,
         footer.h,
     );
     let context = Rect::new(footer.x, footer.y - context_h, footer.w, footer.h);
@@ -316,13 +337,53 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
                 project_matches,
             );
         }
-        actions.button(
-            permission,
-            permission_label,
-            Hit::TogglePermissions,
-            panel.permissions_open,
-            project_matches,
-        );
+        if full_access {
+            let (x, y) = app.mouse();
+            draw_button(
+                actions.frame,
+                p,
+                permission,
+                permission,
+                project_matches && permission.contains(x, y),
+                panel.permissions_open,
+            );
+            let content = permission.inset(SIDEBAR_LIST_GAP, 0.0);
+            let label = ellipsize(
+                actions.frame,
+                permission_label,
+                app.fonts.ui_small,
+                (content.w - shield_gutter).max(0.0),
+            );
+            let label_width = actions
+                .frame
+                .measure(FontKind::Ui, app.fonts.ui_small, &label);
+            let (cx, cy) = center(permission);
+            let left = (cx - (shield_gutter + label_width) / 2.0).max(content.x);
+            icons::shield_plus(actions.frame, (left + 5.0, cy), p.warning, permission);
+            ui_text_small(
+                actions.frame,
+                app,
+                left + shield_gutter,
+                permission,
+                &label,
+                p.warning,
+                content,
+            );
+            if project_matches && permission.w > 0.0 {
+                actions.hits.push((permission, Hit::TogglePermissions));
+            }
+        } else {
+            actions.button(
+                permission,
+                permission_label,
+                Hit::TogglePermissions,
+                panel.permissions_open,
+                project_matches,
+            );
+        }
+        if show_attach {
+            actions.button(attach, attach_label, Hit::Attach(false), false, true);
+        }
         if let Some(path) = attachment_path {
             let end = context_end;
             let remove = Rect::new(
@@ -348,33 +409,14 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
                 p.text_muted,
                 bounds,
             );
-        } else if can_attach {
-            let end = context_end;
-            let attach = Rect::new(
+        } else if show_selection {
+            let selection = Rect::new(
                 context.x,
                 context.y,
-                (end - context.x - 5.0).clamp(0.0, 64.0),
+                (context.w - 4.0).clamp(0.0, 72.0),
                 context.h,
             );
-            actions.button(
-                attach,
-                t!("agent-attach-file"),
-                Hit::Attach(false),
-                false,
-                true,
-            );
-            let selection = Rect::new(
-                attach.right() + 3.0,
-                context.y,
-                (end - attach.right() - 7.0).clamp(0.0, 72.0),
-                context.h,
-            );
-            if selection.w >= 40.0
-                && app
-                    .editor
-                    .active()
-                    .is_some_and(|doc| !doc.selection.is_empty())
-            {
+            if selection.w >= 40.0 {
                 actions.button(
                     selection,
                     t!("agent-attach-selection"),
