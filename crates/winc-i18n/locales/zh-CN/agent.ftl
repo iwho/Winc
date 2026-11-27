@@ -56,7 +56,7 @@ agent-invalid-path = 此路径未指向当前项目内的文件。
 agent-history = 历史
 agent-model = 模型
 agent-effort = 推理强度
-agent-tokens = 会话共 { $total } 个 Token · 上轮 { $last } 个
+agent-tokens = 当前上下文 { $current } Token
 agent-parallel = 多个 Codex 任务可能写入此项目，请检查重叠的修改。
 agent-switch-project = 切换项目
 agent-more = 加载更多
@@ -71,7 +71,7 @@ agent-unread = 有新消息 ↓
 agent-steer = 指导
 agent-approve-session = 本会话
 agent-cancel-turn = 停止任务
-agent-tokens-window = 累计 { $total } · 上轮 { $last } · 上下文上限 { $window }
+agent-tokens-window = 当前上下文 { $current } · 上下文上限 { $window }
 agent-read = 读取文件
 agent-search = 搜索文件
 agent-test = 运行测试
@@ -92,3 +92,26 @@ agent-permission-full = 完全访问
 agent-permission-ask-detail = 编辑工作区外的文件或使用互联网前询问。
 agent-permission-auto-detail = 由 Codex 自动审核超出沙箱权限的操作。
 agent-permission-full-detail = 可不受限制地访问本机文件和互联网。
+
+agent-queue-add = 加入队列
+agent-queue-save = 保存修改
+agent-queue-now = 立即发送
+agent-queue-delete = 删除
+agent-queue-edit = 编辑
+agent-queue-attachment = 附件消息
+
+agent-quota-week = 周
+agent-quota-five = 5小时
+agent-quota-remaining = { $period }剩余 { $remaining }
+agent-quota-reset = （{ $reset }重置）
+
+agent-mon = 周一
+agent-tue = 周二
+agent-wed = 周三
+agent-thu = 周四
+agent-fri = 周五
+agent-sat = 周六
+agent-sun = 周日
+agent-next-weekday = 下{ $day }
+
+agent-split = 分屏／合并会话

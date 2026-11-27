@@ -13,7 +13,6 @@ pub(crate) enum Tab {
     Changes,
     History,
     Models,
-    Efforts,
 }
 
 #[derive(Default)]
@@ -84,14 +83,22 @@ impl Panel {
             return None;
         }
         let window = window.filter(|&window| window > 0);
-        let label = match window {
+        let compact = |value: u64| {
+            if value > 1000 {
+                format!("{:.1}k", value as f64 / 1000.0)
+            } else {
+                value.to_string()
+            }
+        };
+        let last_label = compact(last);
+        let window_label = window.map(compact);
+        let label = match window_label.as_deref() {
             Some(window) => t!(
                 "agent-tokens-window",
-                total = total as f64,
-                last = last as f64,
-                window = window as f64
+                current = last_label.as_str(),
+                window = window
             ),
-            None => t!("agent-tokens", total = total as f64, last = last as f64),
+            None => t!("agent-tokens", current = last_label.as_str()),
         };
         // Total is cumulative across requests. The latest request reflects context usage.
         let fraction = window.map(|window| (last as f64 / window as f64).min(1.0) as f32);
@@ -311,6 +318,7 @@ mod tests {
         panel.select("first".into());
         panel.field.set_text("first prompt");
         panel.current_mut().unwrap().send_request = Some(Submission {
+            queued: false,
             id: 9,
             steer: false,
             text: "first prompt".into(),

@@ -8,6 +8,17 @@ pub use winc_config::PermissionMode;
 
 use std::path::PathBuf;
 
+/// One account quota window.
+#[derive(Clone, Debug)]
+pub struct RateLimitWindow {
+    /// Window duration in minutes.
+    pub minutes: u64,
+    /// Remaining percentage.
+    pub remaining: f64,
+    /// Next reset, as Unix seconds.
+    pub resets_at: Option<u64>,
+}
+
 /// Maximum UTF-8 size of a single prompt, including attached editor context.
 pub const MAX_PROMPT: usize = 256 * 1024;
 
@@ -46,6 +57,8 @@ pub enum SubmitError {
 /// Agent operations supported by Winc.
 #[derive(Debug)]
 pub enum Command {
+    /// Read account usage limits.
+    RateLimits,
     /// Create a session in the project's root.
     NewSession,
     /// Load a saved session and its recent turns.
@@ -305,6 +318,8 @@ pub enum Failure {
 /// Events delivered in wire order, with adjacent text deltas batched.
 #[derive(Debug)]
 pub enum Event {
+    /// Account quota windows, as advertised by Codex.
+    RateLimits(Vec<RateLimitWindow>),
     /// The handshake completed and the account was checked.
     Ready {
         /// Whether Codex requires authentication and has no active account.

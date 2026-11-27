@@ -339,14 +339,21 @@ fn draw_island_corners(app: &App, frame: &mut Frame<'_>, editor: bool, sidebar: 
     if sidebar && l.sidebar.right() > 0.0 {
         frame.round_corners(l.sidebar, RADIUS_ISLAND, p.frame_bg);
     }
-    if editor {
+    let agent_maximized = app.agent.as_ref().is_some_and(|panel| {
+        panel.shown && panel.maximized && panel.rects.body.w > 0.0
+    });
+    if editor && !agent_maximized {
         round_editor_corners(app, frame);
     }
-    if l.terminal.h > 0.0 {
+    if l.terminal.h > 0.0 && !agent_maximized {
         frame.round_corners(l.terminal, RADIUS_ISLAND, p.frame_bg);
     }
     if l.git_panel.h > 0.0 {
         frame.round_corners(l.git_panel, RADIUS_ISLAND, p.frame_bg);
+    }
+    let agent = app.agent_rects().body;
+    if agent.w > 0.0 && agent.h > 0.0 {
+        frame.round_corners(agent, RADIUS_ISLAND, p.frame_bg);
     }
 }
 

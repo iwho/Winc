@@ -53,6 +53,9 @@ impl App {
             editor,
             terminal: terminal::TerminalPanel::default(),
             agent: None,
+            agent_peer: None,
+            agent_split: false,
+            agent_focus_right: false,
             run: terminal::run::RunConfigs::default(),
             store: crate::app::settings::Store {
                 saved_config: config.clone(),

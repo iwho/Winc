@@ -291,6 +291,25 @@ pub fn plus(frame: &mut Frame<'_>, (cx, cy): (f32, f32), size: f32, color: Color
     frame.stroke(&lines, STROKE, color, clip);
 }
 
+/// New conversation: a pencil inside a rounded square.
+pub fn new_conversation(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip: Rect) {
+    frame.stroke(
+        &rounded_outline(cx - 6.5, cy - 6.5, 13.0, 13.0, 2.5),
+        STROKE,
+        color,
+        clip,
+    );
+    let pencil = [
+        Stroke::Line(cx - 3.0, cy + 3.0, cx - 2.5, cy + 0.5),
+        Stroke::Line(cx - 2.5, cy + 0.5, cx + 2.0, cy - 4.0),
+        Stroke::Line(cx + 2.0, cy - 4.0, cx + 4.0, cy - 2.0),
+        Stroke::Line(cx + 4.0, cy - 2.0, cx - 0.5, cy + 2.5),
+        Stroke::Line(cx - 0.5, cy + 2.5, cx - 3.0, cy + 3.0),
+        Stroke::Line(cx + 0.5, cy - 2.5, cx + 2.5, cy - 0.5),
+    ];
+    frame.stroke(&pencil, STROKE, color, clip);
+}
+
 /// 绘制减号，笔宽和长度与加号相同。
 pub fn minus(frame: &mut Frame<'_>, (cx, cy): (f32, f32), size: f32, color: Color, clip: Rect) {
     let h = size / 2.0;

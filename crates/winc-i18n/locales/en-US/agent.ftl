@@ -56,7 +56,7 @@ agent-invalid-path = This path does not resolve to a file inside the current pro
 agent-history = History
 agent-model = Model
 agent-effort = Reasoning
-agent-tokens = { $total } tokens in session · { $last } last turn
+agent-tokens = Current context { $current } tokens
 agent-parallel = Multiple Codex tasks can write to this project. Review overlapping edits.
 agent-switch-project = Switch project
 agent-more = Load more
@@ -71,7 +71,7 @@ agent-unread = New activity ↓
 agent-steer = Guide
 agent-approve-session = Session
 agent-cancel-turn = Stop turn
-agent-tokens-window = { $total } total · { $last } last · { $window } context
+agent-tokens-window = Current context { $current } · Context limit { $window }
 agent-read = Read files
 agent-search = Search files
 agent-test = Run tests
@@ -92,3 +92,26 @@ agent-permission-full = Full access
 agent-permission-ask-detail = Ask to edit outside the workspace or use the internet.
 agent-permission-auto-detail = Let Codex review requests to go beyond the sandbox.
 agent-permission-full-detail = Allow unrestricted file and internet access.
+
+agent-queue-add = Queue
+agent-queue-save = Save changes
+agent-queue-now = Send now
+agent-queue-delete = Delete
+agent-queue-edit = Edit
+agent-queue-attachment = Attachment
+
+agent-quota-week = Weekly
+agent-quota-five = 5h
+agent-quota-remaining = { $period } { $remaining } left
+agent-quota-reset =  (resets { $reset })
+
+agent-mon = Monday
+agent-tue = Tuesday
+agent-wed = Wednesday
+agent-thu = Thursday
+agent-fri = Friday
+agent-sat = Saturday
+agent-sun = Sunday
+agent-next-weekday = Next { $day }
+
+agent-split = Split / merge chats

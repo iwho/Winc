@@ -8,6 +8,15 @@ use crate::app::{CommitTarget, HistoryTarget};
 /// 鼠标在按钮上停留满 `TOOLTIP_DELAY`（500 毫秒）才显示，避免鼠标扫过时闪现。提示位于按钮
 /// 下方并水平居中；下方放不下时（状态栏上的按钮）改在上方；概览标尺上的提示位于标尺左侧。
 pub(super) fn draw_tooltip(app: &App, frame: &mut Frame<'_>) {
+    if let Some((button, label)) = agent::tooltip(app) {
+        draw_tip(
+            app,
+            frame,
+            (button, &label, crate::app::animation::TipPlace::Below),
+            1.0,
+        );
+        return;
+    }
     // 鼠标刚离开的提示在原处淡出。
     if let Some((button, label, place, clock)) = &app.overlays.tooltip.leaving {
         draw_tip(app, frame, (*button, label, *place), clock.fade_out());

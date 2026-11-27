@@ -50,6 +50,24 @@ fn bounded(value: &str, limit: usize) -> String {
     crate::prefix(value, limit).to_owned()
 }
 
+fn rate_limits(value: &Value) -> Vec<RateLimitWindow> {
+    let bucket = value["rateLimitsByLimitId"]
+        .get("codex")
+        .unwrap_or(&value["rateLimits"]);
+    ["primary", "secondary"]
+        .into_iter()
+        .filter_map(|key| {
+            let window = &bucket[key];
+            let used = window["usedPercent"].as_f64()?;
+            Some(RateLimitWindow {
+                minutes: window["windowDurationMins"].as_u64()?,
+                remaining: (100.0 - used).clamp(0.0, 100.0),
+                resets_at: window["resetsAt"].as_u64(),
+            })
+        })
+        .collect()
+}
+
 fn string(value: &Value) -> Option<String> {
     value.as_str().map(str::to_owned)
 }
@@ -273,6 +291,7 @@ fn turns_page(session: &str, result: &Value) -> Option<(Vec<Turn>, Option<String
 
 #[derive(Debug)]
 pub(super) enum Reply {
+    RateLimits,
     Initialize,
     Account,
     Session,
@@ -334,6 +353,7 @@ impl Protocol {
                 json!({"cwd": root, "limit": 25, "cursor": cursor}),
                 Reply::History,
             ),
+            Command::RateLimits => ("account/rateLimits/read", json!({}), Reply::RateLimits),
             Command::Models(cursor) => (
                 "model/list",
                 json!({"cursor": cursor, "includeHidden": false}),
@@ -451,6 +471,7 @@ impl Protocol {
                     .collect();
                 Event::History(id, sessions, string(&result["nextCursor"]))
             }
+            Reply::RateLimits => Event::RateLimits(rate_limits(result)),
             Reply::Models => Event::Models(
                 id,
                 array(&result["data"]).iter().filter_map(model).collect(),
@@ -665,6 +686,7 @@ impl Protocol {
                 }
                 Event::Delta(key, id, kind, bounded(delta, limit))
             }
+            "account/rateLimits/updated" => Event::RateLimits(rate_limits(params)),
             "thread/tokenUsage/updated" => {
                 let Some(key) = key(params) else { return };
                 let usage = &params["tokenUsage"];
@@ -882,6 +904,20 @@ pub(super) fn request(id: u64, method: &str, params: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_codex_quota_windows_and_converts_usage_to_remaining() {
+        let limits = rate_limits(&json!({"rateLimitsByLimitId": {"codex": {
+            "primary": {"usedPercent": 60.5, "windowDurationMins": 300, "resetsAt": 12345},
+            "secondary": {"usedPercent": 12, "windowDurationMins": 10080}
+        }}}));
+        assert_eq!(limits.len(), 2);
+        assert_eq!(limits[0].remaining, 39.5);
+        assert_eq!(limits[0].minutes, 300);
+        assert_eq!(limits[0].resets_at, Some(12345));
+        assert_eq!(limits[1].remaining, 88.0);
+        assert!(rate_limits(&json!({"rateLimits": null})).is_empty());
+    }
 
     #[test]
     fn turn_start_applies_the_selected_permissions() {

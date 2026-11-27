@@ -417,3 +417,53 @@ pub fn local_time() -> (i32, i32, i32, i32, i32, i32) {
 
 #[cfg(test)]
 mod tests;
+
+/// Local weekday (Monday = 0), hour and minute for a Unix timestamp.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub fn local_reset_time(seconds: u64) -> Option<(u32, u32, u32)> {
+    let seconds: libc::time_t = seconds.try_into().ok()?;
+    let mut tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
+    // SAFETY: both pointers refer to valid storage for this call.
+    if unsafe { libc::localtime_r(&seconds, tm.as_mut_ptr()).is_null() } {
+        return None;
+    }
+    // SAFETY: localtime_r succeeded and initialized tm.
+    let tm = unsafe { tm.assume_init() };
+    Some((
+        ((tm.tm_wday + 6) % 7) as u32,
+        tm.tm_hour as u32,
+        tm.tm_min as u32,
+    ))
+}
+
+/// Local weekday (Monday = 0), hour and minute for a Unix timestamp.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn local_reset_time(seconds: u64) -> Option<(u32, u32, u32)> {
+    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    let ticks = seconds
+        .checked_add(11_644_473_600)?
+        .checked_mul(10_000_000)?;
+    let file = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    // SAFETY: SYSTEMTIME contains only integer fields, for which zero is valid.
+    let mut utc: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    // SAFETY: SYSTEMTIME contains only integer fields, for which zero is valid.
+    let mut local: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    // SAFETY: input and output pointers are valid; null selects the system timezone.
+    if unsafe {
+        FileTimeToSystemTime(&file, &mut utc) == 0
+            || SystemTimeToTzSpecificLocalTime(std::ptr::null(), &utc, &mut local) == 0
+    } {
+        return None;
+    }
+    Some((
+        (u32::from(local.wDayOfWeek) + 6) % 7,
+        u32::from(local.wHour),
+        u32::from(local.wMinute),
+    ))
+}

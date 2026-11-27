@@ -354,10 +354,34 @@ fn codex_path(configured: Option<PathBuf>) -> Result<PathBuf, Failure> {
     let locations = std::env::split_paths(&path).filter(|path| path.is_absolute());
     #[cfg(target_os = "macos")]
     let locations = locations.chain(MACOS_BIN_DIRS.map(PathBuf::from));
-    locations
+    let from_path = locations
         .map(|dir| dir.join(name))
-        .find(|path| path.is_file())
-        .ok_or(Failure::ExecutableNotFound)
+        .find(|path| path.is_file());
+    #[cfg(windows)]
+    let from_path = from_path.or_else(|| {
+        let local_app_data = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+        desktop_codex_path(&local_app_data)
+    });
+    from_path.ok_or(Failure::ExecutableNotFound)
+}
+
+/// The desktop app caches its CLI in versioned directories outside the user's PATH.
+#[cfg(windows)]
+fn desktop_codex_path(local_app_data: &Path) -> Option<PathBuf> {
+    if !local_app_data.is_absolute() {
+        return None;
+    }
+    std::fs::read_dir(local_app_data.join("OpenAI").join("Codex").join("bin"))
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let path = entry.path().join("codex.exe");
+            let metadata = path.metadata().ok()?;
+            metadata.is_file().then(|| (metadata.modified().ok(), path))
+        })
+        .max()
+        .map(|(_, path)| path)
 }
 
 fn read_frame(pipe: &mut impl BufRead, line: &mut Vec<u8>) -> Result<Value, Failure> {
@@ -539,6 +563,29 @@ impl<'a> Client<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn desktop_discovery_skips_cache_directories_without_the_cli() -> io::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "winc-codex-discovery-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let bin = root.join("OpenAI").join("Codex").join("bin");
+        let installed = bin.join("installed");
+        std::fs::create_dir_all(&installed)?;
+        std::fs::create_dir(bin.join("incomplete"))?;
+        let executable = installed.join("codex.exe");
+        std::fs::write(&executable, [])?;
+        let found = desktop_codex_path(&root);
+        std::fs::remove_dir_all(root)?;
+        assert_eq!(found, Some(executable));
+        Ok(())
+    }
 
     #[test]
     fn reads_utf8_and_refuses_truncated_or_oversized_frames() {

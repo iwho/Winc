@@ -1014,6 +1014,9 @@ pub struct App {
     pub(crate) terminal: terminal::TerminalPanel,
     /// Allocated when the Codex panel first opens.
     pub(crate) agent: Option<Box<agent::Panel>>,
+    pub(crate) agent_peer: Option<Box<agent::Panel>>,
+    pub(crate) agent_split: bool,
+    pub(crate) agent_focus_right: bool,
     /// 当前目录的运行配置。
     pub(crate) run: terminal::run::RunConfigs,
     /// 当前生效的配置。

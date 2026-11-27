@@ -19,7 +19,6 @@ use winc_i18n::t;
 use super::*;
 
 const MIN_WIDTH: f32 = 240.0;
-const MAX_WIDTH: f32 = 800.0;
 const MAX_CARDS: usize = 10_000;
 const MAX_TRANSCRIPT_BYTES: usize = 8 * 1024 * 1024;
 const ESTIMATED_HEIGHT: f32 = 52.0;
@@ -58,6 +57,7 @@ pub(crate) struct DraftImage {
 }
 
 struct Submission {
+    queued: bool,
     id: u64,
     steer: bool,
     text: String,
@@ -279,7 +279,16 @@ enum TurnTiming {
     Finished(Duration),
 }
 
+#[derive(Clone)]
+pub(crate) struct QueuedMessage {
+    pub(crate) text: String,
+    attachment: Option<std::rc::Rc<editor::Attachment>>,
+    image: Option<std::rc::Rc<DraftImage>>,
+}
+
 struct Conversation {
+    queue: VecDeque<QueuedMessage>,
+    editing: Option<(usize, QueuedMessage)>,
     session: Session,
     transcript: Transcript,
     running: Option<TurnKey>,
@@ -306,6 +315,8 @@ impl Conversation {
         Self {
             session,
             transcript: Transcript::default(),
+            queue: VecDeque::new(),
+            editing: None,
             running: None,
             timing: None,
             send_request: None,
@@ -335,9 +346,14 @@ impl Conversation {
 
 #[derive(Clone)]
 pub(crate) enum Hit {
+    Split,
+    Maximize,
     New,
     Close,
     Send,
+    QueueEdit(usize),
+    QueueDelete(usize),
+    QueueSend(usize),
     Stop,
     Retry,
     CopyMessage(usize),
@@ -378,7 +394,11 @@ pub(crate) struct PanelRects {
 }
 
 pub(crate) struct Panel {
+    pub(crate) rate_limits: Vec<winc_agent::RateLimitWindow>,
+    rate_limits_request: Option<u64>,
+    rate_limits_refresh: Option<Instant>,
     pub(crate) shown: bool,
+    pub(crate) maximized: bool,
     pub(crate) rects: PanelRects,
     pub(crate) width: f32,
     pub(crate) field: TextField,
@@ -389,6 +409,8 @@ pub(crate) struct Panel {
     pub(crate) standalone: bool,
     pub(crate) hits: Vec<(Rect, Hit)>,
     pub(crate) viewport: Rect,
+    pub(crate) queue_viewport: Rect,
+    pub(crate) queue_scroll: f32,
     pub(crate) text_hits: Vec<TextHit>,
     pub(crate) selection: Option<TextSelection>,
     pub(crate) scroll: f32,
@@ -414,8 +436,12 @@ impl Panel {
     fn new() -> Self {
         Self {
             shown: true,
+            rate_limits: Vec::new(),
+            rate_limits_request: None,
+            rate_limits_refresh: None,
+            maximized: false,
             rects: PanelRects::default(),
-            width: MAX_WIDTH,
+            width: f32::INFINITY,
             field: TextField::multiline(),
             completion: composer::Completion::default(),
             connection: Connection::Unavailable,
@@ -424,6 +450,8 @@ impl Panel {
             standalone: false,
             hits: Vec::new(),
             viewport: Rect::default(),
+            queue_viewport: Rect::default(),
+            queue_scroll: 0.0,
             text_hits: Vec::new(),
             selection: None,
             scroll: 0.0,
@@ -646,6 +674,108 @@ impl Panel {
         }
     }
 
+    pub(crate) fn queued(&self) -> impl Iterator<Item = &QueuedMessage> {
+        self.current()
+            .into_iter()
+            .flat_map(|session| session.queue.iter())
+    }
+
+    pub(crate) fn editing_queue(&self) -> bool {
+        self.current()
+            .is_some_and(|session| session.editing.is_some())
+    }
+
+    fn draft_message(&self) -> QueuedMessage {
+        QueuedMessage {
+            text: self.field.text().to_owned(),
+            attachment: self.attachment.clone(),
+            image: self.image.clone(),
+        }
+    }
+
+    fn put_draft(&mut self, draft: QueuedMessage) {
+        self.field.set_text(&draft.text);
+        self.attachment = draft.attachment;
+        self.image = draft.image;
+    }
+
+    fn enqueue(&mut self) {
+        if !self.can_send() {
+            return;
+        }
+        let draft = self.draft_message();
+        let Some(session) = self.current_mut() else {
+            return;
+        };
+        if let Some((index, previous)) = session.editing.take() {
+            session.queue.insert(index.min(session.queue.len()), draft);
+            self.put_draft(previous);
+        } else {
+            session.queue.push_back(draft);
+            self.field.set_text("");
+            self.attachment = None;
+            self.image = None;
+        }
+    }
+
+    fn send_queued(&mut self, session_id: &str, index: usize, immediate: bool) {
+        let Some(session) = self.conversations.get(session_id) else {
+            return;
+        };
+        if self.connection != Connection::Ready
+            || !session.loaded
+            || session.send_request.is_some()
+            || session.stop_request.is_some()
+            || self
+                .approvals
+                .iter()
+                .any(|approval| approval.turn.session == session_id)
+            || (!immediate && session.running.is_some())
+        {
+            return;
+        }
+        let Some(draft) = session.queue.get(index).cloned() else {
+            return;
+        };
+        let mut prompt = draft.text.clone();
+        if let Some(attachment) = &draft.attachment {
+            attachment.append_to(&mut prompt);
+        }
+        let image = draft.image.as_ref().map(|image| image.png.clone());
+        let steer = session.running.is_some();
+        let command = if let Some(turn) = session.running.clone() {
+            Command::Steer {
+                turn,
+                text: prompt,
+                image,
+            }
+        } else {
+            Command::Send {
+                session: session_id.to_owned(),
+                text: prompt,
+                image,
+                model: session.model.clone(),
+                effort: session.effort.clone(),
+                permissions: self.permissions,
+            }
+        };
+        if let Some(id) = self.submit(command) {
+            let session = self
+                .conversations
+                .get_mut(session_id)
+                .expect("queued session");
+            session.queue.remove(index);
+            session.send_request = Some(Submission {
+                queued: true,
+                id,
+                steer,
+                text: draft.text,
+                attachment: draft.attachment,
+                image: draft.image,
+            });
+        }
+    }
+
     fn send(&mut self) {
         if !self.can_send() {
             return;
@@ -688,6 +818,7 @@ impl Panel {
                 session.timing = None;
             }
             session.send_request = Some(Submission {
+                queued: false,
                 id,
                 steer,
                 text,
@@ -710,6 +841,9 @@ impl Panel {
             return;
         }
         let sent = session.send_request.take().expect("matching submission");
+        if sent.queued {
+            return;
+        }
         let (field, attachment, image) = if self.selected.as_deref() == Some(session_id) {
             (&mut self.field, &mut self.attachment, &mut self.image)
         } else {
@@ -756,18 +890,34 @@ impl Panel {
                 };
                 if !login_required {
                     self.discover();
+                    self.rate_limits_request = self.submit(Command::RateLimits);
+                    self.rate_limits_refresh = Some(Instant::now() + Duration::from_secs(60));
                     if let Some(selected) = self.selected.clone() {
                         self.choose(selected);
                     }
                 }
             }
+            Event::RateLimits(limits) => {
+                self.rate_limits = limits;
+                self.rate_limits_request = None;
+            }
             Event::Disconnected(error) => {
+                self.rate_limits.clear();
+                self.rate_limits_request = None;
+                self.rate_limits_refresh = None;
                 self.provider = None;
                 self.connection = Connection::Unavailable;
                 self.error = Some(failure(error));
                 self.opening = None;
                 self.approvals.clear();
                 for session in self.conversations.values_mut() {
+                    if let Some(sent) = session.send_request.as_ref().filter(|sent| sent.queued) {
+                        session.queue.push_front(QueuedMessage {
+                            text: sent.text.clone(),
+                            attachment: sent.attachment.clone(),
+                            image: sent.image.clone(),
+                        });
+                    }
                     session.loaded = false;
                     session.older_request = None;
                     if session.running.take().is_some() || session.send_request.take().is_some() {
@@ -779,12 +929,28 @@ impl Panel {
                 }
             }
             Event::RequestFailed(id, error) => {
+                if self.rate_limits_request == Some(id) {
+                    self.rate_limits_request = None;
+                    return;
+                }
                 self.error = Some(failure(error));
                 self.catalog_failed(id);
                 if self.opening.is_some_and(|(request, _)| request == id) {
                     self.opening = None;
                 }
                 for session in self.conversations.values_mut() {
+                    if let Some(sent) = session
+                        .send_request
+                        .as_ref()
+                        .filter(|sent| sent.id == id && sent.queued)
+                    {
+                        session.queue.push_front(QueuedMessage {
+                            text: sent.text.clone(),
+                            attachment: sent.attachment.clone(),
+                            image: sent.image.clone(),
+                        });
+                        session.status = Some(TurnStatus::Failed);
+                    }
                     if session
                         .send_request
                         .as_ref()
@@ -1190,15 +1356,40 @@ impl App {
     }
 
     pub(super) fn agent_timer_tick(&mut self, now: Instant) -> Option<Instant> {
+        let first = self.agent_pane_timer_tick(now);
+        let second = if self.agent_peer.is_some() {
+            self.swap_agent_panes();
+            let wake = self.agent_pane_timer_tick(now);
+            self.swap_agent_panes();
+            wake
+        } else {
+            None
+        };
+        first.into_iter().chain(second).min()
+    }
+
+    fn agent_pane_timer_tick(&mut self, now: Instant) -> Option<Instant> {
         let panel = self.agent.as_mut()?;
+        let quota_wake = if panel.shown && panel.connection == Connection::Ready {
+            let due = panel.rate_limits_refresh.unwrap_or(now);
+            if now >= due {
+                if panel.rate_limits_request.is_none() {
+                    panel.rate_limits_request = panel.submit(Command::RateLimits);
+                }
+                panel.rate_limits_refresh = Some(now + Duration::from_secs(60));
+            }
+            panel.rate_limits_refresh
+        } else {
+            None
+        };
         if !panel.shown || !panel.busy() {
             panel.timer_wake = None;
-            return None;
+            return quota_wake;
         }
         if let Some(wake) = panel.timer_wake
             && now < wake
         {
-            return Some(wake);
+            return Some(quota_wake.map_or(wake, |quota| quota.min(wake)));
         }
         let next = now + Duration::from_millis(33);
         let redraw = panel.timer_wake.is_some();
@@ -1206,10 +1397,19 @@ impl App {
         if redraw {
             self.request_redraw();
         }
-        Some(next)
+        Some(quota_wake.map_or(next, |quota| quota.min(next)))
     }
 
     pub(super) fn poll_agent(&mut self) {
+        self.poll_agent_pane();
+        if self.agent_peer.is_some() {
+            self.swap_agent_panes();
+            self.poll_agent_pane();
+            self.swap_agent_panes();
+        }
+    }
+
+    fn poll_agent_pane(&mut self) {
         let Some(panel) = &mut self.agent else { return };
         let Some(provider) = &mut panel.provider else {
             return;
@@ -1224,6 +1424,20 @@ impl App {
                 touched.extend(editor::reported_files(panel.root.as_deref(), &item.files));
             }
             panel.event(event);
+        }
+        let queued_sessions: Vec<_> = panel
+            .conversations
+            .iter()
+            .filter(|(_, session)| {
+                !session.queue.is_empty()
+                    && session.editing.is_none()
+                    && session.running.is_none()
+                    && session.status == Some(TurnStatus::Completed)
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in queued_sessions {
+            panel.send_queued(&id, 0, false);
         }
         panel.limit_transcripts();
         let shown = panel.shown;
@@ -1277,7 +1491,11 @@ impl App {
             && self.agent_project_matches()
             && let Some(panel) = &mut self.agent
         {
-            panel.send();
+            if panel.can_stop() || panel.editing_queue() {
+                panel.enqueue();
+            } else {
+                panel.send();
+            }
             self.request_redraw();
         }
     }
@@ -1310,6 +1528,7 @@ impl App {
     pub(super) fn agent_caption_controls(&self) -> impl Iterator<Item = Rect> + '_ {
         self.agent
             .iter()
+            .chain(self.agent_peer.iter().filter(|_| self.agent_split))
             .filter(|panel| panel.shown && panel.rects.body.w > 0.0)
             .flat_map(|panel| {
                 std::iter::once(panel.rects.divider).chain(panel.hits.iter().map(|(rect, _)| *rect))
@@ -1318,6 +1537,7 @@ impl App {
     }
 
     pub(super) fn layout_agent(&mut self) {
+        let available_width = self.agent_available_width();
         let git_full = self.git.panel.full && self.git_panel_shown();
         let Some(panel) = self.agent.as_mut().filter(|panel| panel.shown) else {
             return;
@@ -1327,14 +1547,26 @@ impl App {
             return;
         }
         let layout = &mut self.layout;
+        if panel.maximized {
+            panel.rects.body = Rect::new(
+                layout.editor.x,
+                layout.top_bar.y,
+                layout.editor.w,
+                layout.editor.bottom() - layout.top_bar.y,
+            );
+            return;
+        }
         let right = layout.editor.right();
-        let w = panel
-            .width
-            .min((layout.editor.w - 160.0).max(layout.editor.w * 0.45))
-            .round();
+        let max_width = (available_width * 0.8).floor();
+        let preferred_width = if panel.width.is_finite() {
+            panel.width
+        } else {
+            available_width * 0.5
+        };
+        let w = preferred_width.min(max_width).round();
         let left = right - w;
         let end = left - ISLAND_GAP;
-        let top = layout.window.y;
+        let top = layout.top_bar.y;
         let height = layout.editor.bottom() - top;
         panel.rects.body = Rect::new(left, top, w, height);
         let divider_top = layout.top_bar.y;
@@ -1359,6 +1591,7 @@ impl App {
     }
 
     pub(in crate::app) fn agent_click(&mut self, x: f32, y: f32) -> bool {
+        self.focus_agent_pane_at(x, y);
         let rects = self.agent_rects();
         if rects.divider.contains(x, y) {
             self.pointer.drag = Drag::AgentDivider {
@@ -1411,7 +1644,35 @@ impl App {
                     }
                 }
                 Hit::Close => self.toggle_agent(),
+                Hit::Split => self.toggle_agent_split(),
+                Hit::Maximize => {
+                    panel.maximized = !panel.maximized;
+                    self.relayout();
+                    self.request_redraw();
+                }
                 Hit::Send => self.agent_send(),
+                Hit::QueueDelete(index) => {
+                    if let Some(session) = panel.current_mut() {
+                        session.queue.remove(index);
+                    }
+                }
+                Hit::QueueSend(index) => {
+                    if let Some(id) = panel.selected.clone() {
+                        panel.send_queued(&id, index, true);
+                    }
+                }
+                Hit::QueueEdit(index) => {
+                    if !panel.editing_queue() {
+                        let previous = panel.draft_message();
+                        if let Some(session) = panel.current_mut()
+                            && let Some(draft) = session.queue.remove(index)
+                        {
+                            session.editing = Some((index, previous));
+                            panel.put_draft(draft);
+                            self.focus = Focus::Agent;
+                        }
+                    }
+                }
                 Hit::Complete(index) => self.agent_complete(index),
                 Hit::Stop => panel.stop(),
                 Hit::Retry => {
@@ -1543,19 +1804,68 @@ impl App {
     }
 
     pub(in crate::app) fn resize_agent(&mut self, x: f32, grab: f32) {
+        let max_width = (self.agent_available_width() * 0.8).floor();
         if let Some(panel) = &mut self.agent {
-            panel.width = (panel.rects.body.right() - x + grab).clamp(MIN_WIDTH, MAX_WIDTH);
+            panel.width =
+                (panel.rects.body.right() - x + grab).clamp(MIN_WIDTH.min(max_width), max_width);
             self.relayout();
             self.request_redraw();
         }
     }
 
+    fn agent_available_width(&self) -> f32 {
+        let left = (self.layout.sidebar.right() + ISLAND_GAP).max(ISLAND_MARGIN);
+        (self.layout.window.right() - ISLAND_MARGIN - left).max(0.0)
+    }
+
+    fn swap_agent_panes(&mut self) {
+        if let (Some(active), Some(peer)) = (&mut self.agent, &mut self.agent_peer) {
+            peer.rects = active.rects;
+            peer.shown = active.shown;
+            peer.width = active.width;
+            peer.maximized = active.maximized;
+        }
+        std::mem::swap(&mut self.agent, &mut self.agent_peer);
+        self.agent_focus_right = !self.agent_focus_right;
+    }
+
+    fn toggle_agent_split(&mut self) {
+        if self.agent_peer.is_none() {
+            let mut peer = Box::new(Panel::new());
+            if let Some(active) = &self.agent {
+                peer.permissions = active.permissions;
+            }
+            self.agent_peer = Some(peer);
+            self.swap_agent_panes();
+            self.connect_agent();
+            self.swap_agent_panes();
+        }
+        self.agent_split = !self.agent_split;
+        self.relayout();
+        self.request_redraw();
+    }
+
+    fn focus_agent_pane_at(&mut self, x: f32, y: f32) {
+        let body = self.agent_rects().body;
+        if self.agent_split
+            && body.contains(x, y)
+            && (x >= body.x + body.w * 0.5) != self.agent_focus_right
+        {
+            self.swap_agent_panes();
+            self.focus = Focus::Agent;
+            self.request_redraw();
+        }
+    }
+
     pub(in crate::app) fn scroll_agent(&mut self, x: f32, y: f32, pixels: f32) -> bool {
+        self.focus_agent_pane_at(x, y);
         if !self.agent_rects().body.contains(x, y) {
             return false;
         }
         if let Some(panel) = &mut self.agent {
-            if panel.field.view.area.contains(x, y) {
+            if panel.queue_viewport.contains(x, y) {
+                panel.queue_scroll = (panel.queue_scroll + pixels).max(0.0);
+            } else if panel.field.view.area.contains(x, y) {
                 panel.field.wheel_scroll(pixels);
             } else if panel.viewport.contains(x, y) {
                 panel.scroll_viewport(pixels);
@@ -1570,6 +1880,46 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::snapshot::{blank_app, paint};
+
+    #[test]
+    fn split_panes_preserve_independent_drafts_and_focus() {
+        let (mut app, _) = test_panel(0);
+        app.agent.as_mut().unwrap().field.set_text("left draft");
+        let mut peer = Box::new(Panel::new());
+        peer.field.set_text("right draft");
+        app.agent_peer = Some(peer);
+        app.agent_split = true;
+        paint(&mut app);
+        let body = app.agent_rects().body;
+        let left_field = app.agent.as_ref().unwrap().field.view.area;
+        let right_field = app.agent_peer.as_ref().unwrap().field.view.area;
+        assert!(left_field.right() < right_field.x);
+        app.focus_agent_pane_at(body.right() - 10.0, body.y + 50.0);
+        assert!(app.agent_focus_right);
+        assert_eq!(app.agent.as_ref().unwrap().field.text(), "right draft");
+        app.focus_agent_pane_at(body.x + 10.0, body.y + 50.0);
+        assert!(!app.agent_focus_right);
+        assert_eq!(app.agent.as_ref().unwrap().field.text(), "left draft");
+        assert_eq!(app.agent_peer.as_ref().unwrap().field.text(), "right draft");
+    }
+
+    #[test]
+    fn queued_acknowledgement_preserves_the_current_draft() {
+        let (mut app, turn) = test_panel(0);
+        let panel = app.agent.as_mut().unwrap();
+        panel.field.set_text("same text");
+        panel.current_mut().unwrap().send_request = Some(Submission {
+            queued: true,
+            id: 999,
+            steer: false,
+            text: "same text".into(),
+            attachment: None,
+            image: None,
+        });
+        panel.acknowledge_submission(&turn.session, 999, false);
+        assert_eq!(panel.field.text(), "same text");
+        assert!(panel.current().unwrap().send_request.is_none());
+    }
 
     #[test]
     fn composer_permission_menu_selects_a_mode() {

@@ -25,8 +25,8 @@ impl App {
         self.pointer.mouse = (x, y);
         if self.agent.as_ref().is_some_and(|panel| {
             panel.shown
-                && (panel.viewport.contains(x, y)
-                    || panel.viewport.contains(previous.0, previous.1))
+                && (panel.rects.body.contains(x, y)
+                    || panel.rects.body.contains(previous.0, previous.1))
         }) {
             self.request_redraw();
         }

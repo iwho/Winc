@@ -18,6 +18,7 @@ const CONTENT_TOP: f32 = SIDEBAR_LIST_GAP;
 const USER_MESSAGE_PAD_Y: f32 = SIDEBAR_GAP;
 const MESSAGE_HEADER: f32 = 16.0;
 const STATUS_TOP_GAP: f32 = SIDEBAR_GAP + SIDEBAR_LIST_GAP;
+const STATUS_PAD_Y: f32 = 6.0;
 const RUNNING_SPIN_SCALE: f32 = 0.5;
 
 pub(super) fn draw(app: &mut App, frame: &mut Frame<'_>) {
@@ -27,7 +28,30 @@ pub(super) fn draw(app: &mut App, frame: &mut Frame<'_>) {
     // The field and chat caches are mutated while drawing. The existing
     // input renderer also reads the window's theme, metrics and IME state.
     if let Some(mut panel) = app.agent.take() {
-        draw_panel(app, frame, &mut panel);
+        let whole = panel.rects.body;
+        if app.agent_split {
+            let half = (whole.w - 1.0) * 0.5;
+            let left = Rect::new(whole.x, whole.y, half, whole.h);
+            let right = Rect::new(whole.x + half + 1.0, whole.y, half, whole.h);
+            panel.rects.body = if app.agent_focus_right { right } else { left };
+            draw_panel(app, frame, &mut panel);
+            if let Some(mut peer) = app.agent_peer.take() {
+                peer.rects.body = if app.agent_focus_right { left } else { right };
+                let focus = app.focus;
+                app.focus = Focus::Editor;
+                draw_panel(app, frame, &mut peer);
+                app.focus = focus;
+                peer.rects.body = whole;
+                app.agent_peer = Some(peer);
+            }
+            frame.rect(
+                Rect::new(whole.x + half, whole.y, 1.0, whole.h),
+                app.palette.border.alpha(0.55),
+            );
+        } else {
+            draw_panel(app, frame, &mut panel);
+        }
+        panel.rects.body = whole;
         app.agent = Some(panel);
     }
 }
@@ -37,6 +61,7 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     panel.hits.clear();
     panel.text_hits.clear();
     panel.viewport = Rect::default();
+    panel.queue_viewport = Rect::default();
     if area.w <= 0.0 || area.h <= 0.0 {
         return;
     }
@@ -67,60 +92,26 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     let header = Rect::new(start, caption.y, (end - start).max(0.0), caption.h);
     let button_y = header.y + (header.h - BUTTON) / 2.0;
     let close = Rect::new(end - BUTTON, button_y, BUTTON, BUTTON).intersect(header);
+    let split = Rect::new(close.x - BUTTON - TAB_GAP, button_y, BUTTON, BUTTON).intersect(header);
+    let maximize =
+        Rect::new(split.x - BUTTON - TAB_GAP, button_y, BUTTON, BUTTON).intersect(header);
     let project_matches = app.agent_matches_workspace(panel);
-    let (label, action, enabled) = match panel.connection {
-        _ if !project_matches && panel.root.is_some() => (
-            t!("agent-switch-project"),
-            Hit::SwitchProject,
-            !panel.any_active(),
-        ),
-        Connection::Ready => (t!("agent-new"), Hit::New, true),
-        Connection::Connecting => (t!("agent-reconnect"), Hit::Retry, false),
-        _ => (t!("agent-reconnect"), Hit::Retry, !panel.any_active()),
-    };
     let icon = Rect::new(header.x, button_y, BUTTON_SMALL, BUTTON).intersect(header);
-    let title_x = icon.right() + TAB_GAP;
-    let title_min = frame.measure(FontKind::Ui, app.fonts.ui, t!("agent-title"));
-    let history_label = t!("agent-history");
-    let history_w = button_width(app, frame, history_label);
-    let action_w =
-        button_width(app, frame, label).min((close.x - title_x - title_min - TAB_GAP).max(0.0));
-    let actions_end = close.x - TAB_GAP;
-    let inline_history =
-        actions_end - history_w - TAB_GAP - action_w >= title_x + title_min + SIDEBAR_GAP;
-    let history = Rect::new(actions_end - history_w, button_y, history_w, BUTTON);
-    let action_end = if inline_history {
-        history.x - TAB_GAP
-    } else {
-        actions_end
-    };
-    let action_rect =
-        Rect::new(action_end - action_w, button_y, action_w, BUTTON).intersect(header);
-    let title_end = action_rect.x - TAB_GAP;
-    let title = Rect::new(title_x, header.y, (title_end - title_x).max(0.0), header.h);
-    let title_text = panel.session_title().unwrap_or(t!("agent-title"));
-    let title_text = truncate_end(frame, title_text, app.fonts.ui, title.w);
     frame.rect_clipped(icon.inset(0.0, 2.0), p.selected, RADIUS_ROW, header);
     icons::codex(frame, center(icon), p.accent, icon);
-    ui_text(frame, app, title.x, title, &title_text, p.text, title);
-    let history_enabled = panel.connection == Connection::Ready;
-    {
-        let history_selected = panel.tab == Tab::History;
-        let mut buttons = Actions {
-            app,
-            frame,
-            hits: &mut panel.hits,
-        };
-        buttons.button(action_rect, label, action, false, enabled);
-        if inline_history {
-            buttons.button(
-                history,
-                history_label,
-                Hit::Show(Tab::History),
-                history_selected,
-                history_enabled,
-            );
-        }
+    draw_button(frame, p, maximize, area, maximize.contains(x, y), false);
+    if panel.maximized {
+        icons::shrink(frame, center(maximize), p.text_muted, maximize);
+    } else {
+        icons::expand(frame, center(maximize), p.text_muted, maximize);
+    }
+    if maximize.w > 0.0 {
+        panel.hits.push((maximize, Hit::Maximize));
+    }
+    draw_button(frame, p, split, area, split.contains(x, y), app.agent_split);
+    icons::split(frame, center(split), p.text_muted, split);
+    if split.w > 0.0 {
+        panel.hits.push((split, Hit::Split));
     }
     draw_button(frame, p, close, area, close.contains(x, y), false);
     icons::collapse(
@@ -134,15 +125,8 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         panel.hits.push((close, Hit::Close));
     }
 
-    let toolbar = Rect::new(
-        body.x,
-        header.bottom() + BUTTON_GAP,
-        body.w,
-        BUTTON + 2.0 * BUTTON_GAP,
-    );
-    let history = (!inline_history).then_some((history_label, history_w, history_enabled));
-    draw_session_controls(app, frame, panel, toolbar, history);
-    let mut top = toolbar.bottom() + SIDEBAR_LIST_GAP;
+    let mut top = header.bottom() + SIDEBAR_LIST_GAP;
+    top = draw_session_overview(app, frame, panel, Rect::new(body.x, top, body.w, ROW));
     if panel.workspace_parallel {
         let warning = t!("agent-parallel");
         let lines = wrap_text(warning, body.w, |text| {
@@ -155,7 +139,9 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         }
     }
     let focused = app.focus == Focus::Agent;
-    let input_h = 60.0_f32.min((body.h * 0.22).max(20.0));
+    let input_h = 2.0 * fields::AREA_LINE;
+    let composer_pad = 10.0;
+    let composer_pad_y = 8.0;
     let can_attach = project_matches
         && !panel.standalone
         && app
@@ -169,24 +155,26 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             .editor
             .active()
             .is_some_and(|doc| !doc.selection.is_empty());
-    let has_context = show_selection || has_attachment || panel.standalone;
+    let has_context = has_attachment || panel.standalone;
     let context_h = if has_context {
         BUTTON_SMALL + SIDEBAR_LIST_GAP
     } else {
         0.0
     };
-    let composer_h = input_h + BUTTON_SMALL + 3.0 * SIDEBAR_LIST_GAP + context_h;
+    let composer_h = input_h + BUTTON_SMALL + 2.0 * composer_pad_y + SIDEBAR_LIST_GAP + context_h;
     let composer = Rect::new(body.x, body.bottom() - composer_h, body.w, composer_h);
     let footer = Rect::new(
-        composer.x + SIDEBAR_LIST_GAP,
-        composer.bottom() - BUTTON_SMALL - SIDEBAR_LIST_GAP,
-        (composer.w - 2.0 * SIDEBAR_LIST_GAP).max(0.0),
+        composer.x + composer_pad,
+        composer.bottom() - BUTTON_SMALL - composer_pad_y,
+        (composer.w - 2.0 * composer_pad).max(0.0),
         BUTTON_SMALL,
     );
     let can_send = project_matches && panel.can_send();
     let can_stop = panel.can_stop();
-    let send_label = if can_stop {
-        t!("agent-steer")
+    let send_label = if panel.editing_queue() {
+        t!("agent-queue-save")
+    } else if can_stop {
+        t!("agent-queue-add")
     } else {
         t!("agent-send")
     };
@@ -209,9 +197,24 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     let permission_width =
         button_width(app, frame, permission_label) + if full_access { shield_gutter } else { 0.0 };
     let attach_label = t!("agent-attach-file");
-    let permission_space = (permission_end - footer.x - BUTTON_GAP).max(0.0);
+    let selection_label = t!("agent-attach-selection");
+    let selection_space = if show_selection {
+        button_width(app, frame, selection_label) + BUTTON_GAP
+    } else {
+        0.0
+    };
+    let model = panel
+        .model()
+        .map_or(t!("agent-model"), |model| model.name.as_str());
+    let effort = panel.effort().unwrap_or(t!("agent-effort"));
+    let model_text = format!("{model} {effort}");
+    let model_w = (frame.measure(FontKind::Ui, app.fonts.ui_small, &model_text)
+        + frame.measure(FontKind::Ui, app.fonts.ui_small, " ")
+        + 17.0)
+        .min((permission_end - footer.x).max(0.0) * 0.55);
+    let permission_space = (permission_end - footer.x - BUTTON_GAP - model_w - BUTTON_GAP).max(0.0);
     let (permission_w, attach_w) = if show_attach {
-        let available = (permission_space - BUTTON_GAP).max(0.0);
+        let available = (permission_space - BUTTON_GAP - selection_space).max(0.0);
         let attach_w = button_width(app, frame, attach_label)
             .min((available - permission_width).max(available / 2.0));
         (permission_width.min(available - attach_w), attach_w)
@@ -225,38 +228,51 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         attach_w,
         footer.h,
     );
+    let selection_w = (selection_space - BUTTON_GAP)
+        .max(0.0)
+        .min((attach.x - BUTTON_GAP - footer.x).max(0.0));
+    let selection = Rect::new(
+        attach.x - BUTTON_GAP - selection_w,
+        footer.y,
+        selection_w,
+        footer.h,
+    );
+    let model_control = Rect::new(permission.right() + BUTTON_GAP, footer.y, model_w, footer.h);
+
     let context = Rect::new(footer.x, footer.y - context_h, footer.w, footer.h);
     let context_end = context.right();
-    let status_bottom = composer.y - SIDEBAR_GAP;
-    // On short windows, prioritize turn controls and the composer over token details.
-    if status_bottom - top >= 4.0 * ROW
-        && let Some((tokens, fraction)) = panel.token_summary()
-    {
-        top = draw_tokens(
-            app,
-            frame,
-            Rect::new(body.x, top, body.w, ROW),
-            &tokens,
-            fraction,
-        );
-    }
+    let queue_count = panel.queued().count();
+    let queue_content_h = queue_count as f32 * BUTTON;
+    let queue_h = (queue_content_h + SIDEBAR_GAP).min((composer.y - top).max(0.0) * 0.35);
+    let queue_h = if queue_count > 0 { queue_h } else { 0.0 };
+    panel.queue_scroll = panel
+        .queue_scroll
+        .min((queue_content_h + SIDEBAR_GAP - queue_h).max(0.0));
+    let status_bottom = composer.y - STATUS_PAD_Y;
     let status_top = draw_status(
         app,
         frame,
         panel,
-        Rect::new(body.x, top, body.w, (status_bottom - top).max(0.0)),
+        Rect::new(
+            body.x,
+            top + queue_h + STATUS_PAD_Y,
+            body.w,
+            (status_bottom - top - queue_h - STATUS_PAD_Y).max(0.0),
+        ),
         project_matches,
     );
-    let attachment_path = panel.attachment.as_ref().map(|attached| attached.path());
+    let queue = Rect::new(body.x, status_top - STATUS_PAD_Y - queue_h, body.w, queue_h);
+    panel.queue_viewport = queue;
+
     let preview_size = input_h.min(44.0).min(composer.w * 0.3);
     let preview_gutter = panel
         .image
         .as_ref()
         .map_or(0.0, |_| preview_size + SIDEBAR_GAP);
     let field = Rect::new(
-        composer.x + SIDEBAR_GAP,
-        composer.y + SIDEBAR_LIST_GAP,
-        (composer.w - 2.0 * SIDEBAR_GAP - preview_gutter).max(0.0),
+        composer.x + composer_pad,
+        composer.y + composer_pad_y,
+        (composer.w - 2.0 * composer_pad - preview_gutter).max(0.0),
         input_h,
     );
     surface(
@@ -271,6 +287,77 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         RADIUS_ROW + 3.0,
         body,
     );
+    draw_session_controls(app, frame, panel, model_control, &model_text);
+    let attachment_path = panel.attachment.as_ref().map(|attached| attached.path());
+    if queue_count > 0 {
+        frame.rect_clipped(queue, p.group_bg, RADIUS_TAB, body);
+        let bottom = Rect::new(queue.x, queue.bottom() - RADIUS_TAB, queue.w, RADIUS_TAB);
+        frame.rect_clipped(bottom, p.group_bg, 0.0, body);
+        let entries: Vec<_> = panel.queued().map(|entry| entry.text.clone()).collect();
+        let queue_enabled = !panel.editing_queue();
+        let mut actions = Actions {
+            app,
+            frame,
+            hits: &mut panel.hits,
+        };
+        for (index, text) in entries.iter().enumerate() {
+            let row = Rect::new(
+                queue.x + composer_pad,
+                queue.y + SIDEBAR_LIST_GAP + index as f32 * BUTTON - panel.queue_scroll,
+                (queue.w - 2.0 * composer_pad).max(0.0),
+                BUTTON,
+            );
+            if index > 0 {
+                let mut dash_x = row.x;
+                while dash_x < row.right() {
+                    actions.frame.rect_clipped(
+                        Rect::new(dash_x, row.y, (row.right() - dash_x).min(3.0), 1.0),
+                        p.border.alpha(0.25),
+                        0.0,
+                        queue,
+                    );
+                    dash_x += 6.0;
+                }
+            }
+            if row.y < queue.y || row.bottom() > queue.bottom() {
+                continue;
+            }
+            let mut end = row.right();
+            for (label, hit, enabled) in [
+                (t!("agent-queue-now"), Hit::QueueSend(index), queue_enabled),
+                (
+                    t!("agent-queue-delete"),
+                    Hit::QueueDelete(index),
+                    queue_enabled,
+                ),
+                (t!("agent-queue-edit"), Hit::QueueEdit(index), queue_enabled),
+            ] {
+                if !app.cursor_inside() || !row.contains(x, y) {
+                    continue;
+                }
+                let width = button_width(app, actions.frame, label).min((end - row.x).max(0.0));
+                let button = Rect::new(end - width, row.y, width, row.h);
+                actions.button(button, label, hit, false, enabled);
+                end = button.x - BUTTON_GAP;
+            }
+            let bounds = Rect::new(row.x, row.y, (end - row.x).max(0.0), row.h);
+            let summary = text
+                .lines()
+                .next()
+                .filter(|line| !line.is_empty())
+                .unwrap_or(t!("agent-queue-attachment"));
+            let label = ellipsize(actions.frame, summary, app.fonts.ui_small, bounds.w);
+            ui_text_small(
+                actions.frame,
+                app,
+                bounds.x,
+                bounds,
+                &label,
+                p.text_muted,
+                bounds,
+            );
+        }
+    }
     {
         let mut actions = Actions {
             app,
@@ -382,6 +469,9 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             );
         }
         if show_attach {
+            if show_selection && selection.w > 0.0 {
+                actions.button(selection, selection_label, Hit::Attach(true), false, true);
+            }
             actions.button(attach, attach_label, Hit::Attach(false), false, true);
         }
         if let Some(path) = attachment_path {
@@ -409,22 +499,6 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
                 p.text_muted,
                 bounds,
             );
-        } else if show_selection {
-            let selection = Rect::new(
-                context.x,
-                context.y,
-                (context.w - 4.0).clamp(0.0, 72.0),
-                context.h,
-            );
-            if selection.w >= 40.0 {
-                actions.button(
-                    selection,
-                    t!("agent-attach-selection"),
-                    Hit::Attach(true),
-                    false,
-                    true,
-                );
-            }
         } else if panel.standalone && context.w >= 205.0 {
             let end = context_end;
             let hint = Rect::new(
@@ -457,14 +531,22 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     if focused {
         app.ime.cursor = cursor;
     }
-    let chat_end = status_top - STATUS_TOP_GAP;
-    let area = Rect::new(body.x, top, body.w, (chat_end - top).max(0.0));
     frame.rect_clipped(
-        Rect::new(body.x, top - SIDEBAR_LIST_GAP, body.w, 1.0),
+        Rect::new(body.x, status_top - STATUS_PAD_Y - 1.0, body.w, 1.0),
         p.border.alpha(0.55),
         0.0,
         body,
     );
+    let chat_end = queue.y - STATUS_TOP_GAP;
+    let area = Rect::new(body.x, top, body.w, (chat_end - top).max(0.0));
+    if panel.token_summary().is_some() {
+        frame.rect_clipped(
+            Rect::new(body.x, top - SIDEBAR_LIST_GAP, body.w, 1.0),
+            p.border.alpha(0.55),
+            0.0,
+            body,
+        );
+    }
     if area.h > 0.0 {
         match panel.tab {
             Tab::Chat if panel.approval().is_some() => draw_approval(app, frame, panel, area),
@@ -477,7 +559,7 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
                 }
             }
             Tab::Changes => draw_changes(app, frame, panel, area),
-            Tab::History | Tab::Models | Tab::Efforts => draw_catalog(app, frame, panel, area),
+            Tab::History | Tab::Models => draw_catalog(app, frame, panel, area),
         }
     }
     if panel.permissions_open {
@@ -597,158 +679,214 @@ fn draw_session_controls(
     app: &App,
     frame: &mut Frame<'_>,
     panel: &mut Panel,
-    bar: Rect,
-    history: Option<(&str, f32, bool)>,
+    rect: Rect,
+    label: &str,
 ) {
     let p = app.palette;
-    surface(frame, bar, p.group_bg, p.border, RADIUS_ROW + 2.0, bar);
-    let inner = bar.inset(BUTTON_GAP, BUTTON_GAP);
-    let history_w = history.map_or(0.0, |(_, width, _)| width.min(inner.w / 3.0));
-    let available = (inner.w - history_w).max(0.0);
-    let effort = panel.effort().unwrap_or(t!("agent-effort"));
-    let effort_w = (button_width(app, frame, effort) + 12.0).min(available * 0.45);
-    let model = panel
-        .model()
-        .map_or(t!("agent-model"), |model| model.name.as_str());
-    let model_w = (button_width(app, frame, model) + 12.0).min(available - effort_w);
-    let model_rect = Rect::new(inner.x, inner.y, model_w, inner.h);
-    let effort_rect = Rect::new(inner.right() - effort_w, inner.y, effort_w, inner.h);
-    let model_enabled = !panel.models().is_empty();
-    let effort_enabled = panel.model().is_some();
-    let (model_hit, effort_hit) = (panel.tab == Tab::Models, panel.tab == Tab::Efforts);
-    let controls = [
-        (model_rect, model, Tab::Models, model_enabled, model_hit),
-        (
-            effort_rect,
-            effort,
-            Tab::Efforts,
-            effort_enabled,
-            effort_hit,
-        ),
-    ];
+    let enabled = !panel.models().is_empty();
     let (x, y) = app.mouse();
-    for (rect, label, tab, enabled, selected) in controls {
+    let space = frame.measure(FontKind::Ui, app.fonts.ui_small, " ");
+    let text = Rect::new(
+        rect.x + 4.0,
+        rect.y,
+        (rect.w - 17.0 - space).max(0.0),
+        rect.h,
+    );
+    let label = ellipsize(frame, label, app.fonts.ui_small, text.w);
+    let arrow_x = text.x + frame.measure(FontKind::Ui, app.fonts.ui_small, &label) + space + 6.0;
+    let rect = Rect::new(rect.x, rect.y, (arrow_x + 7.0 - rect.x).min(rect.w), rect.h);
+    draw_button(frame, p, rect, rect, enabled && rect.contains(x, y), false);
+    ui_text_small(
+        frame,
+        app,
+        text.x,
+        text,
+        &label,
+        if enabled { p.text } else { p.text_dim },
+        text,
+    );
+    icons::chevron(
+        frame,
+        (arrow_x, center(rect).1),
+        6.0,
+        icons::Direction::Down,
+        p.text_muted,
+        rect,
+    );
+    if enabled && rect.w > 0.0 {
+        panel.hits.push((rect, Hit::Show(Tab::Models)));
+    }
+}
+fn draw_session_overview(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, row: Rect) -> f32 {
+    let row = Rect::new(row.x, row.y + 2.0, row.w, row.h);
+    let p = app.palette;
+    let title = panel.session_title().unwrap_or(t!("agent-title"));
+    let title_area = Rect::new(
+        row.x,
+        row.y,
+        (row.w - 2.0 * BUTTON_SMALL - 2.0 * BUTTON_GAP).max(0.0),
+        row.h,
+    );
+    let title = ellipsize(frame, title, app.fonts.ui, title_area.w);
+    ui_text(
+        frame,
+        app,
+        title_area.x,
+        title_area,
+        &title,
+        p.text,
+        title_area,
+    );
+    let project_matches = app.agent_matches_workspace(panel);
+    let action = if !project_matches && panel.root.is_some() {
+        Hit::SwitchProject
+    } else if panel.connection == Connection::Ready {
+        Hit::New
+    } else {
+        Hit::Retry
+    };
+    let enabled = panel.connection == Connection::Ready
+        || (panel.connection != Connection::Connecting && !panel.any_active());
+    let (x, y) = app.mouse();
+    for (index, hit, active) in [
+        (0, action, enabled),
+        (
+            1,
+            Hit::Show(Tab::History),
+            panel.connection == Connection::Ready,
+        ),
+    ] {
+        let button = Rect::new(
+            title_area.right() + BUTTON_GAP + index as f32 * (BUTTON_SMALL + BUTTON_GAP),
+            row.y,
+            BUTTON_SMALL,
+            row.h,
+        );
         draw_button(
             frame,
             p,
-            rect,
-            inner,
-            enabled && rect.contains(x, y),
-            selected || tab == Tab::Models,
+            button,
+            row,
+            active && button.contains(x, y),
+            false,
         );
-        let arrow_w = if enabled { 13.0 } else { 0.0 };
-        let room = Rect::new(
-            rect.x + SIDEBAR_LIST_GAP,
-            rect.y,
-            (rect.w - 2.0 * SIDEBAR_LIST_GAP - arrow_w).max(0.0),
-            rect.h,
+        let color = if active { p.text_muted } else { p.text_dim };
+        match hit {
+            Hit::New => icons::new_conversation(frame, center(button), color, button),
+            Hit::Show(_) => icons::history(frame, center(button), color, button),
+            _ => icons::refresh(frame, center(button), color, button),
+        }
+        if active {
+            panel.hits.push((button, hit));
+        }
+    }
+    let Some((label, fraction)) = panel.token_summary() else {
+        return row.bottom() + 2.0 + SIDEBAR_GAP;
+    };
+    let track = Rect::new(row.x, row.bottom() + 4.0, row.w, 2.0);
+    frame.rect_clipped(track, p.switch_off, 1.0, track);
+    if let Some(fraction) = fraction {
+        frame.rect_clipped(
+            Rect::new(track.x, track.y, track.w * fraction, track.h),
+            p.accent,
+            1.0,
+            track,
         );
-        let label = truncate_end(frame, label, app.fonts.ui_small, room.w);
-        ui_text_small(
-            frame,
-            app,
-            room.x,
-            room,
-            &label,
-            if enabled { p.text } else { p.text_dim },
-            room,
+    }
+    let detail_line_height = (app.fonts.ui_small * 1.6).ceil().max(24.0);
+    let detail = Rect::new(
+        row.x,
+        track.bottom() + SIDEBAR_LIST_GAP,
+        row.w,
+        detail_line_height,
+    );
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs());
+    let mut quotas = Vec::new();
+    for (minutes, period) in [
+        (300, t!("agent-quota-five")),
+        (10080, t!("agent-quota-week")),
+    ] {
+        let Some(limit) = panel
+            .rate_limits
+            .iter()
+            .find(|limit| limit.minutes == minutes)
+        else {
+            continue;
+        };
+        let remaining = format!("{:.0}%", limit.remaining);
+        let mut text = t!(
+            "agent-quota-remaining",
+            period = period,
+            remaining = remaining.as_str()
         );
-        if enabled && rect.w > 0.0 {
-            icons::chevron(
-                frame,
-                (rect.right() - SIDEBAR_GAP, center(rect).1),
-                7.0,
-                if selected {
-                    icons::Direction::Up
+        if let Some(reset) = limit.resets_at
+            && let Some((weekday, hour, minute)) = crate::system::local_reset_time(reset)
+        {
+            let reset_label = if minutes == 300 {
+                format!("{hour:02}:{minute:02}")
+            } else {
+                let weekdays = [
+                    t!("agent-mon"),
+                    t!("agent-tue"),
+                    t!("agent-wed"),
+                    t!("agent-thu"),
+                    t!("agent-fri"),
+                    t!("agent-sat"),
+                    t!("agent-sun"),
+                ];
+                let (today, now_hour, now_minute) =
+                    crate::system::local_reset_time(now).unwrap_or((0, 0, 0));
+                let week_end = u64::from(7 - today) * 86400
+                    - u64::from(now_hour) * 3600
+                    - u64::from(now_minute) * 60;
+                let day = weekdays[weekday as usize];
+                if reset.saturating_sub(now) >= week_end {
+                    t!("agent-next-weekday", day = day)
                 } else {
-                    icons::Direction::Down
-                },
-                p.text_muted,
-                rect,
-            );
+                    day.to_owned()
+                }
+            };
+            text.push_str(&t!("agent-quota-reset", reset = reset_label.as_str()));
+        }
+        let color = if minutes == 300 && limit.remaining < 20.0 {
+            p.error
+        } else if minutes == 300 && limit.remaining < 50.0 {
+            p.warning
+        } else {
+            p.text_muted
+        };
+        quotas.push((text, color));
+    }
+    let token_w = frame.measure(FontKind::Ui, app.fonts.ui_small, &label);
+    let quota_w: f32 = quotas
+        .iter()
+        .map(|(text, _)| frame.measure(FontKind::Ui, app.fonts.ui_small, text) + SIDEBAR_GAP)
+        .sum();
+    let inline = token_w + quota_w + SIDEBAR_GAP <= detail.w;
+    let token = ellipsize(frame, &label, app.fonts.ui_small, detail.w);
+    ui_text_small(frame, app, detail.x, detail, &token, p.text_muted, detail);
+    let mut bottom = detail.bottom();
+    let mut x = detail.right() - quota_w;
+    for (text, color) in quotas {
+        if inline {
+            let width = frame.measure(FontKind::Ui, app.fonts.ui_small, &text);
+            let bounds = Rect::new(x, detail.y, width, detail_line_height);
+            ui_text_small(frame, app, x, bounds, &text, color, bounds);
+            x += width + SIDEBAR_GAP;
+        } else {
+            for line in wrap_text(&text, detail.w.max(1.0), |text| {
+                frame.measure(FontKind::Ui, app.fonts.ui_small, text)
+            }) {
+                let bounds = Rect::new(detail.x, bottom, detail.w, detail_line_height);
+                ui_text_small(frame, app, bounds.x, bounds, &line, color, bounds);
+                bottom += detail_line_height;
+            }
         }
     }
-    let hits = controls.map(|(rect, _, tab, enabled, _)| {
-        (enabled && rect.w > 0.0).then_some((rect, Hit::Show(tab)))
-    });
-    panel.hits.extend(hits.into_iter().flatten());
-    if let Some((label, _, enabled)) = history {
-        let rect = Rect::new(effort_rect.x - history_w, inner.y, history_w, inner.h);
-        Actions {
-            app,
-            frame,
-            hits: &mut panel.hits,
-        }
-        .button(
-            rect,
-            label,
-            Hit::Show(Tab::History),
-            panel.tab == Tab::History,
-            enabled,
-        );
-    }
+    bottom + SIDEBAR_GAP
 }
-
-fn draw_tokens(
-    app: &App,
-    frame: &mut Frame<'_>,
-    row: Rect,
-    label: &str,
-    fraction: Option<f32>,
-) -> f32 {
-    let p = app.palette;
-    let percent = fraction.map(|fraction| format!("{:.0}%", fraction * 100.0));
-    let percent_w = percent.as_deref().map_or(0.0, |percent| {
-        frame
-            .measure(FontKind::Ui, app.fonts.ui_small, percent)
-            .ceil()
-            + SIDEBAR_GAP
-    });
-    let inline = frame.measure(FontKind::Ui, app.fonts.ui_small, label) + percent_w <= row.w;
-    let label_w = if inline { row.w - percent_w } else { row.w };
-    let lines = wrap_text(label, label_w.max(4.0), |text| {
-        frame.measure(FontKind::Ui, app.fonts.ui_small, text)
-    });
-    let mut top = row.y;
-    for text in lines.into_iter().take(2) {
-        let line = Rect::new(row.x, top, label_w, row.h);
-        ui_text_small(frame, app, line.x, line, text, p.text_muted, line);
-        top += ROW - BUTTON_GAP;
-    }
-    if let (Some(fraction), Some(percent)) = (fraction, percent) {
-        let percent_y = if inline { row.y } else { top };
-        let value = Rect::new(row.right() - percent_w, percent_y, percent_w, row.h);
-        ui_text_small(
-            frame,
-            app,
-            value.x + SIDEBAR_GAP,
-            value,
-            &percent,
-            p.text_muted,
-            value,
-        );
-        let track = if inline {
-            Rect::new(row.x, top + BUTTON_GAP, row.w, 4.0)
-        } else {
-            Rect::new(
-                row.x,
-                top + (ROW - 4.0) / 2.0,
-                (row.w - percent_w).max(0.0),
-                4.0,
-            )
-        };
-        frame.rect_clipped(track, p.switch_off, 2.0, track);
-        let fill = Rect::new(track.x, track.y, track.w * fraction, track.h);
-        frame.rect_clipped(fill, p.accent, 2.0, track);
-        top = if inline {
-            track.bottom()
-        } else {
-            value.bottom()
-        };
-    }
-    top + SIDEBAR_GAP
-}
-
 fn draw_status(
     app: &App,
     frame: &mut Frame<'_>,
@@ -802,12 +940,6 @@ fn draw_status(
         frame.measure(FontKind::Ui, app.fonts.ui_small, text)
     });
     let top = area.bottom() - BUTTON_SMALL * rows.len().clamp(1, max_rows) as f32;
-    frame.rect_clipped(
-        Rect::new(area.x, top - 1.0, area.w, 1.0),
-        p.border,
-        0.0,
-        area,
-    );
     let glyph = (area.x + 8.0, top + BUTTON_SMALL / 2.0);
     if warning {
         icons::warning(frame, glyph, p.warning, area);
@@ -949,20 +1081,23 @@ fn draw_catalog(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect)
                 )
             })
             .collect(),
-        Tab::Efforts => panel
-            .model()
-            .into_iter()
-            .flat_map(|model| &model.efforts)
-            .map(|effort| {
-                (
-                    effort.clone(),
-                    Hit::ChooseEffort(effort.clone()),
-                    panel.effort() == Some(effort),
-                )
-            })
-            .collect(),
         _ => return,
     };
+    if panel.tab == Tab::Models {
+        rows.extend(
+            panel
+                .model()
+                .into_iter()
+                .flat_map(|model| &model.efforts)
+                .map(|effort| {
+                    (
+                        format!("{} · {}", t!("agent-effort"), effort),
+                        Hit::ChooseEffort(effort.clone()),
+                        panel.effort() == Some(effort),
+                    )
+                }),
+        );
+    }
     panel.viewport = area;
     if panel.more() {
         rows.push((t!("agent-more").into(), Hit::More, false));
@@ -1217,7 +1352,7 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                     surface(
                         frame,
                         bubble,
-                        p.selected.alpha(0.25),
+                        p.selected.alpha(0.08),
                         p.tab_edge.alpha(0.5),
                         RADIUS_TAB,
                         area,
@@ -1226,13 +1361,6 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                 ItemKind::Message => {}
                 _ => surface(frame, block, p.group_bg, p.border, RADIUS_TAB, area),
             }
-            let heading = Rect::new(
-                block.x + CARD_PAD,
-                y,
-                (block.w - 62.0).max(0.0),
-                header_height,
-            )
-            .intersect(area);
             let name = match card.item.kind {
                 ItemKind::User => t!("agent-user"),
                 ItemKind::Message => t!("agent-title"),
@@ -1254,22 +1382,14 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
             if matches!(card.item.kind, ItemKind::Message | ItemKind::User) {
                 let (x, mouse_y) = app.mouse();
                 if app.cursor_inside() && block.intersect(area).contains(x, mouse_y) {
-                    ui_text_small(
-                        actions.frame,
-                        app,
-                        heading.x,
-                        heading,
-                        name,
-                        if card.item.kind == ItemKind::User {
-                            p.accent
-                        } else {
-                            p.text_muted
-                        },
-                        heading,
-                    );
+                    let message_offset = if card.item.kind == ItemKind::User {
+                        -3.0
+                    } else {
+                        0.0
+                    };
                     let copy = Rect::new(
                         block.right() - CARD_PAD - BUTTON_SMALL,
-                        y,
+                        y + 2.0 + message_offset,
                         BUTTON_SMALL,
                         header_height,
                     );
@@ -1286,12 +1406,20 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                     if hit.h > 0.0 {
                         actions.hits.push((hit, Hit::CopyMessage(ordinal)));
                     }
-                    if let Some((hour, minute)) = card.message_time {
-                        let label = format!("{hour:02}:{minute:02}");
+                    {
+                        let label = card.message_time.map_or_else(
+                            || "--:--".to_owned(),
+                            |(hour, minute)| format!("{hour:02}:{minute:02}"),
+                        );
                         let width = actions
                             .frame
                             .measure(FontKind::Ui, app.fonts.ui_small, &label);
-                        let time = Rect::new(copy.x - BUTTON_GAP - width, y, width, header_height);
+                        let time = Rect::new(
+                            copy.x - BUTTON_GAP - width,
+                            copy.y + 2.0,
+                            width,
+                            header_height,
+                        );
                         ui_text_small(
                             actions.frame,
                             app,
@@ -1546,14 +1674,10 @@ fn draw_tool_heading(
         "completed" => icons::done(frame, glyph, p.text_muted, hit),
         "failed" => icons::error(frame, glyph, p.error, hit),
         _ if !card.done => {
-            icons::spinner(
-                frame,
-                glyph,
-                5.0,
-                icons::spin_turn() * RUNNING_SPIN_SCALE,
-                p.text_muted,
-                hit,
-            );
+            let seconds = icons::spin_turn() / crate::theme::SPIN_SPEED;
+            let phase = seconds * std::f32::consts::TAU / 2.4;
+            let opacity = 0.6 + 0.35 * phase.cos();
+            icons::play_solid(frame, glyph, p.text_muted.alpha(opacity), hit);
         }
         _ => frame.rect_clipped(
             Rect::new(glyph.0 - 2.0, glyph.1 - 2.0, 4.0, 4.0),
@@ -1689,7 +1813,7 @@ fn card_header_height(kind: ItemKind) -> f32 {
 
 fn content_top(kind: ItemKind) -> f32 {
     if kind == ItemKind::User {
-        USER_MESSAGE_PAD_Y
+        USER_MESSAGE_PAD_Y - 3.0
     } else {
         CONTENT_TOP
     }
@@ -2178,4 +2302,38 @@ impl Actions<'_, '_, '_> {
             self.hits.push((area, hit));
         }
     }
+}
+
+pub(super) fn tooltip(app: &App) -> Option<(Rect, String)> {
+    if !app.cursor_inside() {
+        return None;
+    }
+    let panel = app.agent.as_ref()?;
+    if !panel.shown {
+        return None;
+    }
+    let (x, y) = app.mouse();
+    panel
+        .hits
+        .iter()
+        .chain(
+            app.agent_peer
+                .iter()
+                .filter(|_| app.agent_split)
+                .flat_map(|peer| &peer.hits),
+        )
+        .find_map(|(rect, hit)| {
+            if !rect.contains(x, y) {
+                return None;
+            }
+            let label = match hit {
+                Hit::Split => t!("agent-split"),
+                Hit::New => t!("agent-new"),
+                Hit::Show(Tab::History) => t!("agent-history"),
+                Hit::Retry => t!("agent-reconnect"),
+                Hit::SwitchProject => t!("agent-switch-project"),
+                _ => return None,
+            };
+            Some((*rect, label.to_owned()))
+        })
 }
