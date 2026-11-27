@@ -176,6 +176,7 @@ fn sample() -> State {
         sign_off_repos: vec![PathBuf::from("/a/项目")],
         pdf_thumbnails_hidden: true,
         markdown_toc_pinned: true,
+        agent_permissions: PermissionMode::AutoReview,
         recent_languages: vec!["markdown".to_owned(), "json".to_owned()],
         vim_marks: vec![('A', PathBuf::from("/a/项目/x.rs"), 12, 3)],
         vim_commands: vec!["%s/a/b/g".into(), "w".into()],
@@ -602,5 +603,24 @@ fn commit_messages_keep_the_newest_without_repeats() {
     assert_eq!(
         state.commit_messages.iter().filter(|m| *m == "m10").count(),
         1
+    );
+}
+
+#[test]
+fn codex_permission_modes_round_trip() {
+    for mode in [
+        PermissionMode::Ask,
+        PermissionMode::AutoReview,
+        PermissionMode::FullAccess,
+    ] {
+        let state = State {
+            agent_permissions: mode,
+            ..State::default()
+        };
+        assert_eq!(State::parse(&state.to_json()).agent_permissions, mode);
+    }
+    assert_eq!(
+        State::parse(r#"{"agentPermissions":"unknown"}"#).agent_permissions,
+        PermissionMode::Ask
     );
 }

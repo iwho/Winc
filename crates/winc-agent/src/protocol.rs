@@ -345,16 +345,30 @@ impl Protocol {
                 image,
                 model,
                 effort,
-            } if self.loaded.contains(&session) => (
-                "turn/start",
-                json!({
-                    "threadId": session, "cwd": root, "model": model, "effort": effort,
-                    "approvalPolicy": "on-request", "approvalsReviewer": "user",
-                    "sandboxPolicy": {"type": "workspaceWrite", "networkAccess": false},
-                    "input": turn_input(text, image.as_deref()),
-                }),
-                Reply::Send(session),
-            ),
+                permissions,
+            } if self.loaded.contains(&session) => {
+                use crate::PermissionMode;
+                let (approval, reviewer) = match permissions {
+                    PermissionMode::Ask => ("on-request", "user"),
+                    PermissionMode::AutoReview => ("on-request", "auto_review"),
+                    PermissionMode::FullAccess => ("never", "user"),
+                };
+                let sandbox = if permissions == PermissionMode::FullAccess {
+                    json!({"type": "dangerFullAccess"})
+                } else {
+                    json!({"type": "workspaceWrite", "networkAccess": false})
+                };
+                (
+                    "turn/start",
+                    json!({
+                        "threadId": session, "cwd": root, "model": model, "effort": effort,
+                        "approvalPolicy": approval, "approvalsReviewer": reviewer,
+                        "sandboxPolicy": sandbox,
+                        "input": turn_input(text, image.as_deref()),
+                    }),
+                    Reply::Send(session),
+                )
+            }
             Command::Steer { turn, text, image } if self.loaded.contains(&turn.session) => (
                 "turn/steer",
                 json!({
@@ -868,6 +882,51 @@ pub(super) fn request(id: u64, method: &str, params: Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_start_applies_the_selected_permissions() {
+        use crate::PermissionMode;
+
+        let mut protocol = Protocol::default();
+        protocol.loaded.insert("thread".into());
+        for (permissions, approval, reviewer, sandbox) in [
+            (PermissionMode::Ask, "on-request", "user", "workspaceWrite"),
+            (
+                PermissionMode::AutoReview,
+                "on-request",
+                "auto_review",
+                "workspaceWrite",
+            ),
+            (
+                PermissionMode::FullAccess,
+                "never",
+                "user",
+                "dangerFullAccess",
+            ),
+        ] {
+            let (request, _) = protocol
+                .command(
+                    1,
+                    Command::Send {
+                        session: "thread".into(),
+                        text: "Hello".into(),
+                        image: None,
+                        model: None,
+                        effort: None,
+                        permissions,
+                    },
+                    Path::new("/workspace"),
+                )
+                .unwrap();
+            let params = &request["params"];
+            assert_eq!(params["approvalPolicy"], approval);
+            assert_eq!(params["approvalsReviewer"], reviewer);
+            assert_eq!(params["sandboxPolicy"]["type"], sandbox);
+            if sandbox == "workspaceWrite" {
+                assert_eq!(params["sandboxPolicy"]["networkAccess"], false);
+            }
+        }
+    }
 
     #[test]
     fn expired_approvals_invalidate_the_original_wire_request() {

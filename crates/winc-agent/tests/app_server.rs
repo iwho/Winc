@@ -60,6 +60,7 @@ fn handles_approval_and_interrupt_over_stdio() {
             image: None,
             model: None,
             effort: None,
+            permissions: winc_agent::PermissionMode::Ask,
         })
         .unwrap();
     let mut streamed = String::new();
@@ -192,6 +193,7 @@ fn live_codex_turn() {
             image: None,
             model,
             effort: None,
+            permissions: winc_agent::PermissionMode::Ask,
         })
         .unwrap();
     let mut streamed = String::new();

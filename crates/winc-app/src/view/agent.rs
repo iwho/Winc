@@ -1,6 +1,6 @@
 //! Paints the Codex panel with the existing renderer and multiline input field.
 
-use winc_agent::{ApprovalDecision, ApprovalKind, ItemKind};
+use winc_agent::{ApprovalDecision, ApprovalKind, ItemKind, PermissionMode};
 use winc_typeset::{Colors, Cx, Env, Item as Mark, LaidBlock, Memo, Out};
 
 use crate::app::Focus;
@@ -156,7 +156,19 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     }
     let focused = app.focus == Focus::Agent;
     let input_h = 60.0_f32.min((body.h * 0.22).max(20.0));
-    let composer_h = input_h + BUTTON_SMALL + 3.0 * SIDEBAR_LIST_GAP;
+    let can_attach = project_matches
+        && !panel.standalone
+        && app
+            .editor
+            .active()
+            .is_some_and(|doc| doc.path.is_some() && doc.holds_file_text());
+    let has_context = can_attach || panel.attachment.is_some() || panel.standalone;
+    let context_h = if has_context {
+        BUTTON_SMALL + SIDEBAR_LIST_GAP
+    } else {
+        0.0
+    };
+    let composer_h = input_h + BUTTON_SMALL + 3.0 * SIDEBAR_LIST_GAP + context_h;
     let composer = Rect::new(body.x, body.bottom() - composer_h, body.w, composer_h);
     let footer = Rect::new(
         composer.x + SIDEBAR_LIST_GAP,
@@ -173,12 +185,6 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     };
     let send_w = button_width(app, frame, send_label).min(footer.w);
     let send = Rect::new(footer.right() - send_w, footer.y, send_w, footer.h);
-    let can_attach = project_matches
-        && !panel.standalone
-        && app
-            .editor
-            .active()
-            .is_some_and(|doc| doc.path.is_some() && doc.holds_file_text());
     let can_review =
         !panel.standalone || panel.changes().is_some_and(|changes| !changes.is_empty());
     let change_label = if panel.tab == Tab::Changes {
@@ -189,7 +195,17 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     let change_w =
         button_width(app, frame, change_label).min((send.x - footer.x - BUTTON_GAP).max(0.0));
     let changes = Rect::new(send.x - BUTTON_GAP - change_w, footer.y, change_w, footer.h);
-    let context_end = if can_review { changes.x } else { send.x };
+    let permission_label = permission_label(panel.permissions);
+    let permission_end = if can_review { changes.x } else { send.x };
+    let permission = Rect::new(
+        footer.x,
+        footer.y,
+        button_width(app, frame, permission_label)
+            .min((permission_end - footer.x - BUTTON_GAP).max(0.0)),
+        footer.h,
+    );
+    let context = Rect::new(footer.x, footer.y - context_h, footer.w, footer.h);
+    let context_end = context.right();
     let status_bottom = composer.y - SIDEBAR_GAP;
     // On short windows, prioritize turn controls and the composer over token details.
     if status_bottom - top >= 4.0 * ROW
@@ -300,20 +316,27 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
                 project_matches,
             );
         }
+        actions.button(
+            permission,
+            permission_label,
+            Hit::TogglePermissions,
+            panel.permissions_open,
+            project_matches,
+        );
         if let Some(path) = attachment_path {
             let end = context_end;
             let remove = Rect::new(
-                footer.x,
-                footer.y,
-                (end - footer.x - 4.0).clamp(0.0, 58.0),
-                footer.h,
+                context.x,
+                context.y,
+                (end - context.x - 4.0).clamp(0.0, 58.0),
+                context.h,
             );
             actions.button(remove, t!("agent-detach"), Hit::Detach, false, true);
             let bounds = Rect::new(
                 remove.right() + 3.0,
-                footer.y,
+                context.y,
                 (end - remove.right() - 7.0).max(0.0),
-                footer.h,
+                context.h,
             );
             let path = ellipsize(actions.frame, path, app.fonts.ui_small, bounds.w);
             ui_text_small(
@@ -328,10 +351,10 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         } else if can_attach {
             let end = context_end;
             let attach = Rect::new(
-                footer.x,
-                footer.y,
-                (end - footer.x - 5.0).clamp(0.0, 64.0),
-                footer.h,
+                context.x,
+                context.y,
+                (end - context.x - 5.0).clamp(0.0, 64.0),
+                context.h,
             );
             actions.button(
                 attach,
@@ -342,9 +365,9 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             );
             let selection = Rect::new(
                 attach.right() + 3.0,
-                footer.y,
+                context.y,
                 (end - attach.right() - 7.0).clamp(0.0, 72.0),
-                footer.h,
+                context.h,
             );
             if selection.w >= 40.0
                 && app
@@ -360,13 +383,13 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
                     true,
                 );
             }
-        } else if panel.standalone && footer.w >= 205.0 {
+        } else if panel.standalone && context.w >= 205.0 {
             let end = context_end;
             let hint = Rect::new(
-                footer.x + 3.0,
-                footer.y,
-                (end - footer.x - 9.0).max(0.0),
-                footer.h,
+                context.x + 3.0,
+                context.y,
+                (end - context.x - 9.0).max(0.0),
+                context.h,
             );
             ui_text_small(
                 actions.frame,
@@ -400,23 +423,24 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         0.0,
         body,
     );
-    if area.h <= 0.0 {
-        return;
-    }
-    match panel.tab {
-        Tab::Chat if panel.approval().is_some() => draw_approval(app, frame, panel, area),
-        Tab::Chat => {
-            if panel.transcript().is_none_or(|chat| chat.cards.is_empty()) {
-                panel.viewport = area;
-                draw_empty_chat(app, frame, area);
-            } else {
-                draw_chat(app, frame, panel, area);
+    if area.h > 0.0 {
+        match panel.tab {
+            Tab::Chat if panel.approval().is_some() => draw_approval(app, frame, panel, area),
+            Tab::Chat => {
+                if panel.transcript().is_none_or(|chat| chat.cards.is_empty()) {
+                    panel.viewport = area;
+                    draw_empty_chat(app, frame, area);
+                } else {
+                    draw_chat(app, frame, panel, area);
+                }
             }
+            Tab::Changes => draw_changes(app, frame, panel, area),
+            Tab::History | Tab::Models | Tab::Efforts => draw_catalog(app, frame, panel, area),
         }
-        Tab::Changes => draw_changes(app, frame, panel, area),
-        Tab::History | Tab::Models | Tab::Efforts => draw_catalog(app, frame, panel, area),
     }
-    if focused && app.ime.field_preedit.is_empty() {
+    if panel.permissions_open {
+        draw_permissions(app, frame, panel, body, permission);
+    } else if focused && app.ime.field_preedit.is_empty() {
         let choices: Vec<_> = panel.completion.labels().collect();
         let count = choices.len().min((area.h / TREE_ROW) as usize);
         let mut overlay = Vec::new();
@@ -436,6 +460,85 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
             .button(row, label, Hit::Complete(index), selected, true);
         }
         panel.hits.splice(0..0, overlay);
+    }
+}
+
+fn permission_label(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Ask => t!("agent-permission-ask"),
+        PermissionMode::AutoReview => t!("agent-permission-auto"),
+        PermissionMode::FullAccess => t!("agent-permission-full"),
+    }
+}
+
+fn draw_permissions(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, body: Rect, button: Rect) {
+    let p = app.palette;
+    let options = [
+        (PermissionMode::Ask, t!("agent-permission-ask-detail")),
+        (
+            PermissionMode::AutoReview,
+            t!("agent-permission-auto-detail"),
+        ),
+        (
+            PermissionMode::FullAccess,
+            t!("agent-permission-full-detail"),
+        ),
+    ];
+    let width = body.w.min(420.0);
+    let bottom = button.y - BUTTON_GAP;
+    let row_h = ((bottom - body.y - 2.0 * BUTTON_GAP) / 3.0).clamp(0.0, 43.0);
+    let menu_h = 3.0 * row_h + 2.0 * BUTTON_GAP;
+    let menu = Rect::new(body.x, bottom - menu_h, width, menu_h);
+    surface(frame, menu, p.popup_bg, p.border, RADIUS_ROW + 4.0, body);
+    let (x, y) = app.mouse();
+    for (index, (mode, description)) in options.into_iter().enumerate() {
+        let row = Rect::new(
+            menu.x + BUTTON_GAP,
+            menu.y + BUTTON_GAP + index as f32 * row_h,
+            (menu.w - 2.0 * BUTTON_GAP).max(0.0),
+            row_h,
+        );
+        let selected = mode == panel.permissions;
+        draw_button(frame, p, row, menu, row.contains(x, y), selected);
+        let text = row.inset(SIDEBAR_GAP, 0.0);
+        let title = Rect::new(
+            text.x,
+            text.y,
+            text.w,
+            if row_h >= 36.0 { 21.0 } else { row_h },
+        );
+        let label = permission_label(mode);
+        let label = if selected {
+            format!("✓  {label}")
+        } else {
+            label.to_owned()
+        };
+        let label = ellipsize(frame, &label, app.fonts.ui, title.w);
+        let color = if mode == PermissionMode::FullAccess {
+            p.warning
+        } else {
+            p.text
+        };
+        ui_text(frame, app, title.x, title, &label, color, row);
+        if row_h >= 36.0 {
+            let detail = Rect::new(
+                text.x,
+                title.bottom(),
+                text.w,
+                row.bottom() - title.bottom(),
+            );
+            let description = ellipsize(frame, description, app.fonts.ui_small, detail.w);
+            ui_text_small(
+                frame,
+                app,
+                detail.x,
+                detail,
+                &description,
+                p.text_muted,
+                row,
+            );
+        }
+        panel.hits.push((row, Hit::SetPermissions(mode)));
     }
 }
 

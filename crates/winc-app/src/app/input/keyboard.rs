@@ -113,6 +113,14 @@ impl App {
         if self.diagram_view_key(&event.logical_key, &base, cmd) {
             return;
         }
+        if self.focus == Focus::Agent
+            && event.logical_key == Key::Named(NamedKey::Escape)
+            && let Some(panel) = &mut self.agent
+            && std::mem::take(&mut panel.permissions_open)
+        {
+            self.request_redraw();
+            return;
+        }
         // 链接地址的补全列表开着时，选择、写入和关掉列表的键先给它。
         if self.focus == Focus::Agent
             && self.ime.field_preedit.is_empty()

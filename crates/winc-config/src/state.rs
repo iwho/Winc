@@ -48,9 +48,23 @@ impl State {
     }
 }
 
+/// Approval and sandbox settings for a new turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PermissionMode {
+    /// Ask the user to approve access outside the workspace sandbox.
+    #[default]
+    Ask,
+    /// Route approval requests to Codex automatic review.
+    AutoReview,
+    /// Run without filesystem or network sandboxing.
+    FullAccess,
+}
+
 /// 由程序维护的运行状态：最近目录、各目录的现场和项目工具选择。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct State {
+    /// 用户上次选择的 Codex 权限模式。
+    pub agent_permissions: PermissionMode,
     /// 最近打开的目录，最新的在前，不重复。
     pub recent: Vec<PathBuf>,
     /// 最近打开的文件，最新的在前，不重复；所有窗口共用。
@@ -627,6 +641,11 @@ impl State {
             .get("pdfThumbnailsHidden")
             .and_then(Json::as_bool)
             .unwrap_or(false);
+        state.agent_permissions = match root.get("agentPermissions").and_then(Json::as_str) {
+            Some("autoReview") => PermissionMode::AutoReview,
+            Some("fullAccess") => PermissionMode::FullAccess,
+            _ => PermissionMode::Ask,
+        };
         state.markdown_toc_pinned =
             root.get("markdownTocPinned").and_then(Json::as_bool) == Some(true);
         state.recent_languages = (root.get("recentLanguages").and_then(Json::as_array))
@@ -791,6 +810,14 @@ impl State {
         }
         if self.pdf_thumbnails_hidden {
             fields.push(("pdfThumbnailsHidden", Json::Bool(true)));
+        }
+        let permissions = match self.agent_permissions {
+            PermissionMode::Ask => None,
+            PermissionMode::AutoReview => Some("autoReview"),
+            PermissionMode::FullAccess => Some("fullAccess"),
+        };
+        if let Some(permissions) = permissions {
+            fields.push(("agentPermissions", Json::String(permissions.into())));
         }
         if self.markdown_toc_pinned {
             fields.push(("markdownTocPinned", Json::Bool(true)));

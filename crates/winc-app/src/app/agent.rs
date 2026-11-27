@@ -12,7 +12,7 @@ pub(crate) use sessions::Tab;
 
 use winc_agent::{
     AgentProvider, Approval, ApprovalDecision, CodexProvider, Command, DeltaKind, Event, Failure,
-    Item, ItemKind, LineChanges, Session, SubmitError, TurnKey, TurnStatus,
+    Item, ItemKind, LineChanges, PermissionMode, Session, SubmitError, TurnKey, TurnStatus,
 };
 use winc_i18n::t;
 
@@ -351,6 +351,8 @@ pub(crate) enum Hit {
     Attach(bool),
     Detach,
     RemoveImage,
+    TogglePermissions,
+    SetPermissions(PermissionMode),
     Show(Tab),
     ChooseSession(String),
     ChooseModel(String),
@@ -395,6 +397,8 @@ pub(crate) struct Panel {
     pub(crate) attachment: Option<std::rc::Rc<editor::Attachment>>,
     pub(crate) image: Option<std::rc::Rc<DraftImage>>,
     pub(crate) tab: Tab,
+    pub(crate) permissions: PermissionMode,
+    pub(crate) permissions_open: bool,
     catalog: Catalog,
     default_model: Option<String>,
     default_effort: Option<String>,
@@ -428,6 +432,8 @@ impl Panel {
             attachment: None,
             image: None,
             tab: Tab::Chat,
+            permissions: PermissionMode::Ask,
+            permissions_open: false,
             catalog: Catalog::default(),
             default_model: None,
             default_effort: None,
@@ -673,6 +679,7 @@ impl Panel {
                 image: png,
                 model: self.model().map(|model| model.id.clone()),
                 effort: self.effort().map(str::to_owned),
+                permissions: self.permissions,
             }
         };
         if let Some(id) = self.submit(command) {
@@ -1095,6 +1102,7 @@ impl App {
             && panel.shown
         {
             panel.shown = false;
+            panel.permissions_open = false;
             panel.hits.clear();
             if self.focus == Focus::Agent {
                 self.focus = Focus::Editor;
@@ -1108,6 +1116,7 @@ impl App {
         } else {
             let panel = self.agent.get_or_insert_with(|| Box::new(Panel::new()));
             panel.shown = true;
+            panel.permissions = self.state.agent_permissions;
             if panel.provider.is_none() {
                 self.connect_agent();
             }
@@ -1129,6 +1138,7 @@ impl App {
             .or_else(|| winc_config::config_path().map(|path| path.with_file_name("codex-chat")));
         let executable = self.config.agent_executable.as_deref().map(PathBuf::from);
         let Some(panel) = &mut self.agent else { return };
+        panel.permissions_open = false;
         panel.provider = None;
         panel.connection = Connection::Unavailable;
         let Some(root) = root else {
@@ -1359,11 +1369,28 @@ impl App {
             || self.window_control_at(x, y).is_some()
             || self.resize_edge_at(x, y).is_some()
         {
+            if let Some(panel) = &mut self.agent
+                && std::mem::take(&mut panel.permissions_open)
+            {
+                self.request_redraw();
+            }
             return false;
         }
         let Some(panel) = &mut self.agent else {
             return false;
         };
+        if panel.permissions_open {
+            panel.permissions_open = false;
+            if let Some(mode) = panel.hits.iter().find_map(|(rect, hit)| match hit {
+                Hit::SetPermissions(mode) if rect.contains(x, y) => Some(*mode),
+                _ => None,
+            }) {
+                panel.permissions = mode;
+                self.update_state(move |state| state.agent_permissions = mode);
+            }
+            self.request_redraw();
+            return true;
+        }
         if panel.field.view.area.contains(x, y) {
             panel.selection = None;
             self.focus = Focus::Agent;
@@ -1426,6 +1453,11 @@ impl App {
                 Hit::Attach(selection) => self.agent_attach(selection),
                 Hit::Detach => panel.attachment = None,
                 Hit::RemoveImage => panel.image = None,
+                Hit::TogglePermissions => {
+                    panel.permissions_open = true;
+                    self.focus = Focus::Agent;
+                }
+                Hit::SetPermissions(_) => {}
                 Hit::Show(tab) => panel.show_tab(if panel.tab == tab { Tab::Chat } else { tab }),
                 Hit::ChooseSession(id) => panel.choose(id),
                 Hit::ChooseModel(id) => panel.choose_model(id),
@@ -1537,6 +1569,37 @@ impl App {
 mod tests {
     use super::*;
     use crate::app::snapshot::{blank_app, paint};
+
+    #[test]
+    fn composer_permission_menu_selects_a_mode() {
+        let (mut app, _) = test_panel(0);
+        let click = |app: &mut App, matches_hit: fn(&Hit) -> bool| {
+            paint(app);
+            let rect = app
+                .agent
+                .as_ref()
+                .unwrap()
+                .hits
+                .iter()
+                .find_map(|(rect, hit)| matches_hit(hit).then_some(*rect))
+                .unwrap();
+            assert!(app.agent_click(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
+        };
+        click(&mut app, |hit| matches!(hit, Hit::TogglePermissions));
+        click(&mut app, |hit| {
+            matches!(hit, Hit::SetPermissions(PermissionMode::AutoReview))
+        });
+        let panel = app.agent.as_ref().unwrap();
+        assert_eq!(panel.permissions, PermissionMode::AutoReview);
+        assert!(!panel.permissions_open);
+        let mut reopened = blank_app(false);
+        reopened.state = winc_config::State::parse(&app.state.to_json());
+        reopened.toggle_agent();
+        assert_eq!(
+            reopened.agent.as_ref().unwrap().permissions,
+            PermissionMode::AutoReview
+        );
+    }
 
     #[test]
     fn pasted_image_appears_in_the_composer_and_can_be_removed() {

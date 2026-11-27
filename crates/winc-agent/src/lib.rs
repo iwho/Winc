@@ -4,6 +4,7 @@ mod codex;
 mod protocol;
 
 pub use codex::CodexProvider;
+pub use winc_config::PermissionMode;
 
 use std::path::PathBuf;
 
@@ -72,6 +73,8 @@ pub enum Command {
         model: Option<String>,
         /// Reasoning effort from the selected model.
         effort: Option<String>,
+        /// Permissions for this turn.
+        permissions: PermissionMode,
     },
     /// Add guidance to the identified active turn.
     Steer {
