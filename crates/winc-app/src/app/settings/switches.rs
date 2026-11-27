@@ -10,24 +10,32 @@ impl App {
             Setting::FixOnSave => self.config.fix_on_save == Some(true),
             Setting::HotExit => self.config.hot_exit != Some(false),
             Setting::ConfirmClose => self.config.confirm_close == Some(true),
+            Setting::QuitOnLastWindowClose => self.config.quit_on_last_window_close == Some(true),
             Setting::RestoreFolder => self.config.restore_folder != Some(false),
             Setting::NewFileOnStartup => self.config.new_file_on_startup == Some(true),
             Setting::DetectLanguageOnPaste => self.config.detect_language_on_paste != Some(false),
+            Setting::DragAndDrop => self.config.drag_and_drop != Some(false),
             Setting::StickyScroll => self.config.sticky_scroll != Some(false),
             Setting::VimMode => self.config.vim_enabled == Some(true),
             Setting::VimRelativeNumber => self.config.vim_relative_number == Some(true),
             Setting::VimYankHighlight => self.config.vim_yank_highlight != Some(0),
             Setting::WordWrap => self.config.word_wrap == Some(true),
+            Setting::AlignColumns => self.config.align_columns != Some(false),
             Setting::WholeLines => self.config.whole_lines == Some(true),
             Setting::Minimap => self.config.minimap == Some(true),
+            Setting::RenderLineEndings => self.config.render_line_endings == Some(true),
+            Setting::EditorLigatures => self.config.editor_font_ligatures == Some(true),
             Setting::Outline => self.config.outline != Some(false),
             Setting::LineNumbers => self.config.line_numbers != Some(false),
             Setting::DiffInline => self.config.diff_inline == Some(true),
+            Setting::DiffCollapse => self.config.diff_collapse_unchanged != Some(false),
             Setting::StatusBar => self.config.status_bar != Some(false),
+            Setting::FullTabNames => self.config.full_tab_names != Some(false),
             Setting::RestoreWindow => self.config.restore_window != Some(false),
             Setting::Animations => self.animations_on(),
             Setting::SmoothScrolling => self.smooth_scrolling(),
             Setting::CompactFolders => self.config.compact_folders != Some(false),
+            Setting::AutoReveal => self.auto_reveal(),
             Setting::PreviewOnClick => self.config.preview_on_click == Some(true),
             Setting::RemoteImages => self.config.markdown_remote_images != Some(false),
             Setting::MarkdownLineNumbers => self.config.markdown_line_numbers != Some(false),
@@ -44,9 +52,14 @@ impl App {
             Setting::GitRememberCredentials => self.config.git_remember_credentials != Some(false),
             Setting::SystemProxy => self.config.system_proxy != Some(false),
             Setting::GitInlineBlame => self.config.git_inline_blame != Some(false),
+            Setting::GitCommitHistory => self.config.git_commit_history == Some(true),
             Setting::GitAutoFetch => self.config.git_auto_fetch == Some(true),
+            Setting::GitGenerateCommitMessage => {
+                self.config.git_generate_commit_message == Some(true)
+            }
             Setting::GitTree => !self.git.commit.flat(),
             Setting::GitStagingArea => self.config.git_staging_area == Some(true),
+            Setting::GitCombinedDiff => self.config.git_combined_diff == Some(true),
             Setting::TerminalModule => self.terminal_enabled(),
             Setting::RemoteModule => self.remote_enabled(),
             Setting::ExplorerMenu => self.settings.integration.menu,
@@ -82,9 +95,11 @@ impl App {
             Setting::FixOnSave => self.config.fix_on_save = Some(on),
             Setting::HotExit => self.config.hot_exit = Some(on),
             Setting::ConfirmClose => self.config.confirm_close = Some(on),
+            Setting::QuitOnLastWindowClose => self.config.quit_on_last_window_close = Some(on),
             Setting::RestoreFolder => self.config.restore_folder = Some(on),
             Setting::NewFileOnStartup => self.config.new_file_on_startup = Some(on),
             Setting::DetectLanguageOnPaste => self.config.detect_language_on_paste = Some(on),
+            Setting::DragAndDrop => self.config.drag_and_drop = Some(on),
             Setting::StickyScroll => self.config.sticky_scroll = Some(on),
             Setting::VimMode => {
                 self.config.vim_enabled = Some(on);
@@ -94,16 +109,26 @@ impl App {
             // 关闭记为 0 毫秒，打开恢复默认的时长。
             Setting::VimYankHighlight => self.config.vim_yank_highlight = (!on).then_some(0),
             Setting::WordWrap => self.config.word_wrap = Some(on),
+            Setting::AlignColumns => {
+                self.config.align_columns = Some(on);
+                self.editor.set_align_columns(on);
+                self.relayout();
+            }
             Setting::WholeLines => self.config.whole_lines = Some(on),
             Setting::Minimap => self.config.minimap = Some(on),
+            Setting::RenderLineEndings => self.config.render_line_endings = Some(on),
+            Setting::EditorLigatures => self.config.editor_font_ligatures = Some(on),
             Setting::Outline => self.config.outline = Some(on),
             Setting::LineNumbers => self.config.line_numbers = Some(on),
             Setting::DiffInline => self.config.diff_inline = Some(on),
+            Setting::DiffCollapse => self.config.diff_collapse_unchanged = Some(on),
             Setting::StatusBar => self.config.status_bar = Some(on),
+            Setting::FullTabNames => self.config.full_tab_names = Some(on),
             Setting::RestoreWindow => self.config.restore_window = Some(on),
             Setting::Animations => self.config.ui_animations = Some(on),
             Setting::SmoothScrolling => self.config.smooth_scrolling = Some(on),
             Setting::CompactFolders => self.config.compact_folders = Some(on),
+            Setting::AutoReveal => self.config.tree_auto_reveal = Some(on),
             Setting::PreviewOnClick => self.config.preview_on_click = Some(on),
             Setting::RemoteImages => self.config.markdown_remote_images = Some(on),
             Setting::MarkdownLineNumbers => self.config.markdown_line_numbers = Some(on),
@@ -128,8 +153,11 @@ impl App {
                 winc_editor::proxy::follow_system_proxy(on);
             }
             Setting::GitStagingArea => self.config.git_staging_area = Some(on),
+            Setting::GitCombinedDiff => self.config.git_combined_diff = Some(on),
             Setting::GitInlineBlame => self.config.git_inline_blame = Some(on),
+            Setting::GitCommitHistory => self.config.git_commit_history = Some(on),
             Setting::GitAutoFetch => self.config.git_auto_fetch = Some(on),
+            Setting::GitGenerateCommitMessage => self.config.git_generate_commit_message = Some(on),
             Setting::TerminalModule => self.config.terminal_enabled = Some(on),
             Setting::RemoteModule => self.config.remote_enabled = Some(on),
             Setting::ExplorerMenu => {
@@ -172,8 +200,14 @@ impl App {
         if setting == Setting::DiffInline {
             self.apply_diff_layout();
         }
+        if setting == Setting::DiffCollapse {
+            self.apply_diff_collapse();
+        }
         if setting == Setting::GitStagingArea {
             self.apply_staging_view();
+        }
+        if setting == Setting::GitCombinedDiff {
+            self.apply_combined_view();
         }
         // 关闭预览标签时，现有的预览标签成为普通标签。
         if setting == Setting::PreviewOnClick && !on {

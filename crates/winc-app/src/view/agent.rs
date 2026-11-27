@@ -773,6 +773,7 @@ fn draw_status(
         icons::spinner(
             frame,
             glyph,
+            5.0,
             icons::spin_turn() * RUNNING_SPIN_SCALE,
             p.accent,
             area,
@@ -1506,6 +1507,7 @@ fn draw_tool_heading(
             icons::spinner(
                 frame,
                 glyph,
+                5.0,
                 icons::spin_turn() * RUNNING_SPIN_SCALE,
                 p.text_muted,
                 hit,
@@ -1767,6 +1769,7 @@ fn layout_markdown(
         preedit: false,
         line_numbers: false,
         code_header: 12.0,
+        bleed: (0.0, 0.0),
         tall: 360.0,
         repeat: 0,
         toggles: HashMap::new(),

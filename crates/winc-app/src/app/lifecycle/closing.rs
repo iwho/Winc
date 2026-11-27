@@ -61,13 +61,18 @@ impl App {
     /// 关闭第 `index` 个标签；有未保存的修改时先询问。
     pub(in crate::app) fn close_tab(&mut self, index: usize) {
         if let Some(doc) = self.editor.documents.get(index) {
-            self.request_close(CloseRequest::Tabs(vec![doc.id]));
+            let ids = [doc.id];
+            if !self.confirm_editor_terminal_tabs(&ids) {
+                self.request_close(CloseRequest::Tabs(ids.to_vec()));
+            }
         }
     }
 
     /// 一次关闭多个标签：没有修改的直接关闭，有修改的合并为一次询问。
     pub(in crate::app) fn close_tabs(&mut self, ids: Vec<DocumentId>) {
-        self.request_close(CloseRequest::Tabs(ids));
+        if !self.confirm_editor_terminal_tabs(&ids) {
+            self.request_close(CloseRequest::Tabs(ids));
+        }
     }
 
     /// 处理退出请求：`⌘Q`、程序坞菜单中的「退出」、命令面板中的「退出」。
@@ -104,9 +109,8 @@ impl App {
         if self.config.confirm_close != Some(true) || self.window.hidden {
             return false;
         }
-        // 关闭最后一个窗口在 macOS 以外的平台上就是退出。
-        let quits = request == CloseRequest::Quit
-            || !self.link.shared.others() && !cfg!(target_os = "macos");
+        let quits =
+            request == CloseRequest::Quit || !self.link.shared.others() && self.last_window_quits();
         let (message, button) = if quits {
             (t!("close-confirm-quit"), t!("cmd-quit"))
         } else {
@@ -132,21 +136,27 @@ impl App {
         }
     }
 
+    /// 关闭最后一个窗口是否退出应用：macOS 以外的平台上总是退出，macOS 上按设置
+    /// `editor.quitOnLastWindowClose`。
+    fn last_window_quits(&self) -> bool {
+        !cfg!(target_os = "macos") || self.config.quit_on_last_window_close == Some(true)
+    }
+
     /// 关闭窗口，不再询问是否关闭。
     ///
-    /// macOS 上关闭窗口不退出应用：关闭目录和所有标签，隐藏窗口，应用留在程序坞中，点击
-    /// 图标时窗口带着开始页回来，退出用 ⌘Q；其他平台上关闭窗口就是退出，还有别的窗口时只关闭
-    /// 当前窗口。开着目录的窗口与退出一样不逐个询问，未保存的内容写入备份；没开目录的窗口逐个
+    /// macOS 上关闭窗口默认不退出应用：关闭目录和所有标签，隐藏窗口，应用留在程序坞中，点击
+    /// 图标时窗口带着开始页回来，退出用 ⌘Q；开了 `editor.quitOnLastWindowClose` 时与其他平台
+    /// 相同，关闭最后一个窗口就是退出。还有别的窗口时只关闭当前窗口。开着目录的窗口与退出一样不逐个询问，未保存的内容写入备份；没开目录的窗口逐个
     /// 询问。窗口关闭后其中的终端随之结束，有程序在运行时先确认；macOS 上终端继续运行，不确认。
     fn close_window_confirmed(&mut self) {
         if self.link.shared.others() {
             if !self.confirm_terminal_quit(CloseRequest::CloseWindow) {
                 self.request_close(CloseRequest::CloseWindow);
             }
-        } else if cfg!(target_os = "macos") {
-            self.request_close(CloseRequest::CloseWindow);
-        } else {
+        } else if self.last_window_quits() {
             self.request_quit();
+        } else {
+            self.request_close(CloseRequest::CloseWindow);
         }
     }
 
@@ -400,6 +410,10 @@ impl App {
         self.quit_backups();
         self.remember_session();
         self.leave_backups_on_disk();
+        for group in &mut self.terminal.groups {
+            group.editor = None;
+            group.shown = false;
+        }
         self.remove_all_tabs();
         if self.editor.workspace.is_some() {
             self.close_folder_now();
@@ -491,6 +505,9 @@ impl App {
             _ => self.editor.close(index),
         };
         if let Some(doc) = closed {
+            if doc.terminal {
+                self.close_editor_terminal_session(doc.id);
+            }
             self.forget_git_document(doc.id, doc.path.as_deref());
             self.preview.markdown.forget(doc.id);
             self.preview.latex.forget(doc.id);

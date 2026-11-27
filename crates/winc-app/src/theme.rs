@@ -557,6 +557,7 @@ impl Palette {
             TokenKind::Inserted => self.syntax_string,
             TokenKind::Deleted => self.error,
             TokenKind::Warning => self.warning,
+            TokenKind::Separator => self.text_dim,
         }
     }
 
@@ -696,9 +697,9 @@ pub const TAB_HEIGHT: f32 = 26.0;
 pub const TAB_GAP: f32 = 4.0;
 /// 第一个文件标签离标签栏左边的距离（逻辑像素），与标签上下的留白相同。
 pub const TAB_INSET: f32 = (TOP_BAR - TAB_HEIGHT) / 2.0;
-/// 标签的最大宽度。
+/// 关掉「完整显示文件名」（`editor.fullTabNames`）时标签的最大宽度。
 ///
-/// 标签宽度贴合文件名，文件名更长时截短；所有标签放不下时横向滚动。
+/// 标签宽度贴合文件名，文件名更长时截短；开着这一项时不设这个上限。所有标签放不下时横向滚动。
 pub const TAB_WIDTH_MAX: f32 = 180.0;
 /// 标签的最小宽度：文件名很短时也不窄于该宽度，留出足够的点击范围。
 pub const TAB_WIDTH_MIN: f32 = 80.0;
@@ -776,8 +777,10 @@ pub const SETTINGS_W: f32 = 800.0;
 pub const SETTINGS_H: f32 = 560.0;
 /// 设置卡片与窗口四周至少保留的距离。
 pub const SETTINGS_MARGIN: f32 = 32.0;
-/// 左侧分类栏的宽度。
-pub const SETTINGS_NAV_W: f32 = 240.0;
+/// 左侧分类栏的宽度（逻辑像素）。
+///
+/// 取自调参：放得下图标、最长的分类名和搜索框的占位文字，其余宽度留给右侧的设置项。
+pub const SETTINGS_NAV_W: f32 = 200.0;
 /// 分类栏中每一项的高度。
 pub const SETTINGS_NAV_ROW: f32 = 32.0;
 /// 分类栏中相邻两项之间的间距。

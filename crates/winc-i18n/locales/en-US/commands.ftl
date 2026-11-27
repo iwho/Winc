@@ -10,6 +10,8 @@ cmd-find-references = Find References
 cmd-go-back = Back
 cmd-go-forward = Forward
 cmd-settings = Settings
+cmd-export-settings = Export Settings…
+cmd-import-settings = Import Settings…
 cmd-release-notes = Release Notes
 cmd-keyboard-shortcuts = Keyboard Shortcuts
 cmd-record-keys = Record Keys
@@ -38,10 +40,25 @@ cmd-unsplit = Join All Splits
 cmd-next-pane = Next Split
 cmd-previous-pane = Previous Split
 cmd-split-terminal = Split Terminal
+cmd-move-terminal-to-group = Terminal: Move to New Group
+cmd-move-terminal-to-editor = Terminal: Move to Editor Area
+cmd-new-editor-terminal = Terminal: New in Editor Area
+cmd-move-terminal-to-panel = Terminal: Move to Panel
 cmd-next-terminal-pane = Next Terminal Pane
 cmd-previous-terminal-pane = Previous Terminal Pane
 cmd-next-tab = Next Tab
 cmd-previous-tab = Previous Tab
+cmd-tab-1 = Go to Tab 1
+cmd-tab-2 = Go to Tab 2
+cmd-tab-3 = Go to Tab 3
+cmd-tab-4 = Go to Tab 4
+cmd-tab-5 = Go to Tab 5
+cmd-tab-6 = Go to Tab 6
+cmd-tab-7 = Go to Tab 7
+cmd-tab-8 = Go to Tab 8
+cmd-tab-9 = Go to Tab 9
+cmd-switch-tab = Switch to Recent Tab
+cmd-switch-tab-back = Switch to Recent Tab in Reverse
 cmd-close-folder = Close Folder
 cmd-close-window = Close Window
 cmd-copy-path = Copy Path
@@ -52,6 +69,7 @@ cmd-copy-active-path = Copy Path of Current File
 cmd-copy-key-path = Copy Key Path
 cmd-reveal-active-file-in-finder = Reveal Current File in Finder
 cmd-reveal-active-file-in-folder = Show Current File in Folder
+cmd-reveal-active-file-in-tree = Reveal Current File in File Tree
 cmd-open-in-terminal = Open in External Terminal
 cmd-quit = Quit
 cmd-undo = Undo
@@ -132,6 +150,8 @@ cmd-sort-lines-descending = Sort Lines Descending
 cmd-trim-trailing-whitespace = Trim Trailing Whitespace
 cmd-unescape-unicode = Convert Unicode Escapes to Characters
 cmd-escape-unicode = Convert Characters to Unicode Escapes
+cmd-pretty-print-json = Pretty-Print JSON
+cmd-minify-json = Minify JSON
 cmd-indent-using-spaces = Indent Using Spaces
 cmd-indent-using-tabs = Indent Using Tabs
 cmd-convert-indentation-to-spaces = Convert Indentation to Spaces
@@ -161,6 +181,8 @@ cmd-clear-bookmarks = Clear All Bookmarks
 cmd-format = Format Document
 cmd-format-selection = Format Selection
 cmd-fix = Fix Problems
+cmd-compare-with-clipboard = Compare with Clipboard
+cmd-compare-with-saved = Compare with Saved Version
 cmd-find = Find
 cmd-replace = Replace
 cmd-find-next = Find Next
@@ -212,6 +234,8 @@ cmd-next-diff-file = Next File
 cmd-previous-diff-file = Previous File
 cmd-toggle-diff-layout = Toggle Inline Diff
 cmd-git-show-changes = Git: Show Changes
+cmd-git-show-all-changes = Git: Show Uncommitted Changes
+cmd-git-toggle-combined-diff = Git: Toggle Combined Diff View
 cmd-changes-show-diff = Git: Show Diff of Selected Change
 cmd-changes-open-source = Git: Open Selected Change
 cmd-changes-rollback = Git: Roll Back Selected Changes
@@ -221,9 +245,11 @@ cmd-git-reword-commit = Git: Edit Commit Message…
 cmd-git-go-to-child-commit = Git: Go to Child Commit
 cmd-git-go-to-parent-commit = Git: Go to Parent Commit
 cmd-git-show-output = Git: Show Output
+cmd-git-generate-commit-message = Git: Generate Commit Message
 cmd-git-clone = Git: Clone Repository…
 cmd-git-init = Git: Initialize Repository
 cmd-git-switch-repository = Git: Switch Repository
+cmd-git-add-repository = Git: Add Repository…
 cmd-git-switch-worktree = Git: Switch Worktree…
 cmd-git-new-worktree = Git: New Worktree…
 cmd-git-switch-branch = Git: Switch Branch…
@@ -250,6 +276,7 @@ cmd-enable-terminal = Terminal: Enable Built-in Terminal
 cmd-run-configuration = Run Current Configuration
 cmd-stop-configuration = Stop Current Configuration
 cmd-edit-run-configurations = Edit Run Configurations
+cmd-send-http-request = Send Request
 cmd-clear-terminal = Terminal: Clear
 cmd-terminal-copy = Terminal: Copy
 cmd-terminal-paste = Terminal: Paste
@@ -308,9 +335,12 @@ cmd-cli-usage =
       winc                  Restore the last opened folder
       winc .                Open the current folder
       winc file:line[:col]  Open a file and go to that line
+      winc new-file         Open a file that doesn’t exist yet; it’s created on save
       winc ssh://host/folder [ssh://host/file:line[:col]]
                             Open a folder on a remote host and files in it (needs the Remote module)
       winc -                Read standard input (e.g. cargo build 2>&1 | winc -)
+      -d, --diff file1 file2
+                            Compare two files side by side; repeatable (e.g. git difftool: winc -w -d "$LOCAL" "$REMOTE")
       -w, --wait            Exit after all of the files’ tabs are closed (e.g. git config core.editor "winc -w")
       -n, --new-instance    Start a separate process instead of handing off to the running Winc
       -h, --help            Show this help
@@ -322,10 +352,13 @@ cmd-cli-ssh-mixed = ssh:// arguments must all name the same host and can’t be 
 cmd-cli-ssh-one-off = --wait and - can’t be used with ssh:// arguments
 cmd-cli-ssh-folders = Only one ssh:// argument can be a folder; the others must be files in it
 cmd-cli-wait-needs-file = --wait requires a file
+cmd-cli-diff-needs-files = --diff requires two files
+cmd-cli-diff-not-file = “{ $path }” doesn’t exist or isn’t a file; --diff compares existing files only
 cmd-cli-wsl-needs-name = --wsl requires a distribution name
 cmd-cli-wait-needs-openable-file = --wait requires at least one file that can be opened
 cmd-cli-wait-folder = “{ $path }” is a folder; --wait can only open files
 cmd-cli-open-failed = Couldn’t open “{ $path }”: { $error }
+cmd-cli-no-such-folder = The folder doesn’t exist
 cmd-cli-event-loop-failed = Couldn’t create the event loop: { $error }
 
 ## Keyboard Shortcuts page: command scopes and groups

@@ -888,6 +888,87 @@ fn the_server_watches_a_folder_and_reports_changes() {
     remote::disconnect(&target);
 }
 
+/// 远端搜索：服务进程以 `search` 再次运行自身，在远端遍历和匹配，结果随到随读；本机放弃读取时
+/// 远端的搜索随之结束，其间别的请求照常应答。
+#[test]
+fn the_server_searches_a_folder_and_stops_when_asked() {
+    use std::io::BufReader;
+    use winc_search::host::{self, Mode, Record, Request};
+    use winc_search::{LineMatch, Query};
+
+    let target = connect("search");
+    let dir = scratch("search");
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/main.rs"), "fn main() {\n    needle();\n}\n").unwrap();
+    std::fs::write(dir.join("notes.md"), "no match\n").unwrap();
+    let far = through(&target, &dir);
+    let request = |text: &str| Request {
+        query: Query {
+            text: text.into(),
+            ..Query::default()
+        },
+        region: None,
+        limit: 20_000,
+        mode: Mode::Tree { ignored: false },
+        root: dir.as_os_str().as_bytes().to_vec(),
+        paths: vec![dir.as_os_str().as_bytes().to_vec()],
+        skip: Vec::new(),
+    };
+    let start = |request: &Request| {
+        let exec = remote::Exec::this_server()
+            .arg(host::SEARCH)
+            .stdin(request.encode());
+        remote::spawn(&far, &exec).unwrap()
+    };
+
+    let mut found = BufReader::new(start(&request("NEEDLE")));
+    let file = host::read_record(&mut found).unwrap().unwrap();
+    let expected = Record::File {
+        path: dir.join("src/main.rs").as_os_str().as_bytes().to_vec(),
+        matches: vec![LineMatch {
+            line: 1,
+            cols: 4..10,
+            preview: "needle();".into(),
+            highlight: 0..6,
+        }],
+        lossy: false,
+    };
+    assert_eq!(file, expected);
+    let end = host::read_record(&mut found).unwrap().unwrap();
+    assert_eq!(
+        end,
+        Record::End {
+            truncated: false,
+            gave_up: false
+        }
+    );
+    assert_eq!(host::read_record(&mut found).unwrap(), None);
+
+    // 很多没有匹配的文件：远端还在遍历时结束它，不留下搜索的进程。
+    for index in 0..20_000 {
+        std::fs::write(dir.join(format!("f{index}.txt")), "nothing\n").unwrap();
+    }
+    let running = start(&request("absent"));
+    let stopper = running.stopper();
+    // 搜索进行时别的请求照常应答。
+    assert!(fs::metadata(far.join("notes.md")).unwrap().is_file());
+    stopper.stop();
+    let mut rest = BufReader::new(running);
+    while host::read_record(&mut rest).is_ok_and(|record| record.is_some()) {}
+    let gone = Instant::now() + Duration::from_secs(10);
+    let left = || {
+        let found = Command::new("pgrep")
+            .args(["-f", "winc-server search"])
+            .output();
+        found.is_ok_and(|found| !found.stdout.is_empty())
+    };
+    while left() && Instant::now() < gone {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(!left());
+    remote::disconnect(&target);
+}
+
 #[test]
 fn common_operations_take_one_round_trip() {
     use std::io::Read;
@@ -1117,8 +1198,13 @@ fn an_unread_stream_stops_at_the_window_and_resumes_when_read() {
         let text = std::fs::read_to_string(dir.join("progress")).unwrap_or_default();
         text.trim().parse::<usize>().unwrap_or(0)
     };
-    // 等进度停下来：连续 300 毫秒没有变化。
+    // 先等命令开始输出，再等进度停下来：连续 300 毫秒没有变化。
+    // 命令尚未启动时进度同样不变，不能算作停下。
     let deadline = Instant::now() + Duration::from_secs(30);
+    while progress() == 0 {
+        assert!(Instant::now() < deadline, "命令没有开始输出");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     let mut seen = (progress(), Instant::now());
     while seen.1.elapsed() < Duration::from_millis(300) {
         assert!(Instant::now() < deadline, "命令没有停下：{}", seen.0);

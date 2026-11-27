@@ -22,6 +22,8 @@ pub enum SettingsPage {
     Git,
     /// 终端：默认 shell、面板位置、字体、字号、字重和终端行为。
     Terminal,
+    /// AI：模型服务的地址、密钥、接口协议、调用的模型和超时时间。
+    Ai,
     /// 模块：可选模块的开关。
     Modules,
     /// 快捷键：只列出键位，不含设置项，整页由 [`KeysLayout`] 单独布局。
@@ -39,7 +41,7 @@ pub struct Modules {
 
 impl SettingsPage {
     /// 全部分类，顺序与分类栏从上到下的顺序一致。
-    pub const ALL: [SettingsPage; 11] = [
+    pub const ALL: [SettingsPage; 12] = [
         SettingsPage::General,
         SettingsPage::Appearance,
         SettingsPage::Editor,
@@ -48,6 +50,7 @@ impl SettingsPage {
         SettingsPage::Format,
         SettingsPage::Git,
         SettingsPage::Terminal,
+        SettingsPage::Ai,
         SettingsPage::Modules,
         SettingsPage::Keys,
         SettingsPage::About,
@@ -73,6 +76,7 @@ impl SettingsPage {
             SettingsPage::Format => t!("settings-page-format"),
             SettingsPage::Git => t!("settings-page-git"),
             SettingsPage::Terminal => t!("settings-page-terminal"),
+            SettingsPage::Ai => t!("settings-page-ai"),
             SettingsPage::Modules => t!("settings-page-modules"),
             SettingsPage::Keys => t!("settings-page-keys"),
             SettingsPage::About => t!("settings-page-about"),
@@ -81,8 +85,8 @@ impl SettingsPage {
 
     /// 返回这一页的各组设置项，组内的项从上到下排列。
     ///
-    /// 格式化页中每种语言占一行，`languages` 是要列出的语言。
-    pub fn sections(self, languages: &ToolLanguages) -> Vec<Section> {
+    /// 格式化页中每种语言占一行，Vim 分组下每个冲突的键占一行，由 `listed` 给出。
+    pub fn sections(self, listed: &Listed) -> Vec<Section> {
         use Setting as S;
         let plain = |items: Vec<Setting>| Section { title: None, items };
         let group = |title: &'static str, items: Vec<Setting>| Section {
@@ -91,16 +95,18 @@ impl SettingsPage {
         };
         match self {
             SettingsPage::General => {
+                // 「关闭窗口后退出」只在 macOS 上列出：其他平台上关闭最后一个窗口总是退出。
+                let mut saving = vec![S::AutoSave, S::HotExit, S::ConfirmClose];
+                if cfg!(target_os = "macos") {
+                    saving.push(S::QuitOnLastWindowClose);
+                }
                 let mut sections = vec![
                     group(t!("settings-group-language"), vec![S::Language]),
                     group(
                         t!("settings-group-launch"),
                         vec![S::RestoreFolder, S::NewFileOnStartup, S::RestoreWindow],
                     ),
-                    group(
-                        t!("settings-group-saving"),
-                        vec![S::AutoSave, S::HotExit, S::ConfirmClose],
-                    ),
+                    group(t!("settings-group-saving"), saving),
                     group(
                         t!("settings-group-network"),
                         vec![S::CheckUpdates, S::SystemProxy],
@@ -114,6 +120,10 @@ impl SettingsPage {
                     }
                     sections.push(group(t!("settings-group-integration"), items));
                 }
+                sections.push(group(
+                    t!("settings-group-settings-file"),
+                    vec![S::ExportSettings, S::ImportSettings],
+                ));
                 sections
             }
             SettingsPage::Appearance => {
@@ -143,19 +153,31 @@ impl SettingsPage {
             SettingsPage::Editor => vec![
                 group(
                     t!("settings-group-font-indent"),
-                    vec![S::EditorFont, S::EditorSize, S::TabWidth],
+                    vec![
+                        S::EditorFont,
+                        S::EditorSize,
+                        S::EditorFontWeight,
+                        S::TabWidth,
+                    ],
                 ),
                 group(
                     t!("settings-group-display"),
+                    vec![S::LineNumbers, S::EditorRulers, S::Minimap, S::StickyScroll],
+                ),
+                group(
+                    t!("settings-group-text"),
                     vec![
-                        S::LineNumbers,
                         S::WordWrap,
-                        S::Minimap,
-                        S::StickyScroll,
-                        S::SmoothCaret,
-                        S::RenderWhitespace,
                         S::WholeLines,
+                        S::AlignColumns,
+                        S::EditorLigatures,
+                        S::RenderWhitespace,
+                        S::RenderLineEndings,
                     ],
+                ),
+                group(
+                    t!("settings-group-caret"),
+                    vec![S::CursorStyle, S::SmoothCaret, S::DragAndDrop],
                 ),
                 group(
                     t!("settings-group-new-files"),
@@ -170,15 +192,24 @@ impl SettingsPage {
                         S::VimYankHighlight,
                     ],
                 ),
-            ],
+                // Vim 模式开着、有冲突的键时列出。
+                group(
+                    t!("settings-group-vim-keys"),
+                    listed.vim_keys.iter().map(|&c| S::VimKey(c)).collect(),
+                ),
+            ]
+            .into_iter()
+            .filter(|section| !section.items.is_empty())
+            .collect(),
             SettingsPage::Files => vec![
                 group(
-                    t!("settings-group-opening"),
-                    vec![S::PreviewOnClick, S::DropFolder],
+                    t!("settings-group-tabs"),
+                    vec![S::PreviewOnClick, S::FullTabNames],
                 ),
+                group(t!("settings-group-opening"), vec![S::DropFolder]),
                 group(
                     t!("settings-group-sidebar"),
-                    vec![S::CompactFolders, S::Outline, S::FindInFiles],
+                    vec![S::CompactFolders, S::AutoReveal, S::Outline, S::FindInFiles],
                 ),
             ],
             SettingsPage::Markdown => vec![
@@ -204,6 +235,7 @@ impl SettingsPage {
             SettingsPage::Terminal => {
                 let mut behavior = vec![
                     S::TerminalCopyOnSelect,
+                    S::TerminalRightClick,
                     S::TerminalConfirmClose,
                     S::TerminalApplicationPriority,
                 ];
@@ -221,14 +253,12 @@ impl SettingsPage {
                         ],
                     ),
                     group(
-                        t!("settings-group-display"),
-                        vec![
-                            S::TerminalPosition,
-                            S::TerminalTabPosition,
-                            S::TerminalFont,
-                            S::TerminalSize,
-                            S::TerminalFontWeight,
-                        ],
+                        t!("settings-group-font"),
+                        vec![S::TerminalFont, S::TerminalSize, S::TerminalFontWeight],
+                    ),
+                    group(
+                        t!("settings-group-panel"),
+                        vec![S::TerminalPosition, S::TerminalTabPosition],
                     ),
                     group(t!("settings-group-behavior"), behavior),
                 ]
@@ -236,15 +266,30 @@ impl SettingsPage {
             SettingsPage::Git => vec![
                 group(
                     t!("settings-group-general"),
-                    vec![S::GitPath, S::GitOpenWorktree],
+                    vec![
+                        S::GitPath,
+                        S::GitOpenWorktree,
+                        S::GitLogPlacement,
+                        S::GitScanDepth,
+                    ],
                 ),
                 group(
                     t!("settings-group-commit"),
-                    vec![S::GitStagingArea, S::GitTree],
+                    vec![
+                        S::GitStagingArea,
+                        S::GitTree,
+                        S::GitCommitHistory,
+                        S::GitGenerateCommitMessage,
+                    ],
                 ),
                 group(
                     t!("settings-group-diff"),
-                    vec![S::DiffInline, S::GitInlineBlame],
+                    vec![
+                        S::GitCombinedDiff,
+                        S::DiffInline,
+                        S::DiffCollapse,
+                        S::GitInlineBlame,
+                    ],
                 ),
                 group(
                     t!("settings-group-remote"),
@@ -256,6 +301,16 @@ impl SettingsPage {
                     ],
                 ),
             ],
+            SettingsPage::Ai => vec![group(
+                t!("settings-group-api"),
+                vec![
+                    S::AiBaseUrl,
+                    S::AiApiKey,
+                    S::AiProtocol,
+                    S::AiModel,
+                    S::AiTimeout,
+                ],
+            )],
             SettingsPage::Modules => vec![group(
                 t!("settings-page-modules"),
                 vec![S::GitModule, S::TerminalModule, S::RemoteModule],
@@ -272,11 +327,11 @@ impl SettingsPage {
                     // 没有列出的语言时只有「添加语言…」，直接跟在组标题下面。
                     group(
                         t!("settings-section-format-tools"),
-                        tools(&languages.format, S::FormatCommand, S::AddLanguage),
+                        tools(&listed.format, S::FormatCommand, S::AddLanguage),
                     ),
                     group(
                         t!("settings-section-fix-tools"),
-                        tools(&languages.fix, S::FixCommand, S::AddFixLanguage),
+                        tools(&listed.fix, S::FixCommand, S::AddFixLanguage),
                     ),
                 ]
             }
@@ -302,7 +357,7 @@ impl SettingsPage {
     pub fn first(self) -> Setting {
         match self {
             SettingsPage::Keys => Setting::KeySearch,
-            page => page.sections(&ToolLanguages::default())[0].items[0],
+            page => page.sections(&Listed::default())[0].items[0],
         }
     }
 }

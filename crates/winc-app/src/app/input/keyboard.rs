@@ -98,6 +98,10 @@ impl App {
         if self.alert_key(&event.logical_key, cmd) || self.popup_key(event) {
             return;
         }
+        // 标签页切换列表打开时，选择用的按键先给它。
+        if self.tab_switch_key(event) {
+            return;
+        }
         // 设置浮层是模态的：打开期间只处理它自己的按键，其他快捷键不会传到下层。
         if self.settings.open {
             self.on_key_settings(event, &base, cmd);
@@ -237,6 +241,8 @@ impl App {
             Focus::CommitList => self.on_key_commit_list(event),
             Focus::Outline => self.outline_key(&event.logical_key),
             Focus::LogFilter => self.on_key_log_filter(event, &base, cmd),
+            Focus::GitPanel if self.log_active() => self.log_key(&event.logical_key),
+            Focus::GitPanel => {}
             Focus::Terminal => self.on_key_terminal(event),
             // 这两个输入框使用终端的键位表，Windows、Linux 的 Ctrl+V 不在表中，在此处理。
             Focus::TerminalFind | Focus::TerminalRename if cmd && base == "v" => self.paste(),
@@ -249,7 +255,9 @@ impl App {
     pub(in crate::app) fn key_context(&self) -> Context {
         match self.focus {
             Focus::Editor if self.markdown_keys() => Context::Markdown,
-            Focus::Editor => Context::Editor,
+            // Git 面板中的日志沿用编辑区的键位：日志的命令（如 `F2` 编辑说明）绑定在编辑区上。
+            // 编辑文字的命令在面板中不可用，见 `App::action_available`。
+            Focus::Editor | Focus::GitPanel => Context::Editor,
             Focus::Search => Context::Find,
             Focus::Replace => Context::Replace,
             Focus::Tree => Context::Tree,
@@ -384,11 +392,13 @@ impl App {
     /// 返回按键触发 `action` 时实际执行的命令。
     ///
     /// macOS 上没有打开的标签时，「关闭标签页」的快捷键改为关闭窗口：关掉最后一个标签后再按
-    /// 一次 `⌘W` 关闭窗口。只对按键生效，在命令面板里选「关闭标签页」不会关闭窗口。
-    pub(super) fn keyboard_action(&self, action: Action) -> Action {
+    /// 一次 `⌘W` 关闭窗口。只对按键生效，在命令面板里选「关闭标签页」不会关闭窗口。焦点在 Git
+    /// 面板中时关闭的是面板中的日志。
+    pub(in crate::app) fn keyboard_action(&self, action: Action) -> Action {
         if cfg!(target_os = "macos")
             && action == Action::CloseTab
             && self.editor.documents.is_empty()
+            && !self.git_panel_focused()
         {
             Action::CloseWindow
         } else {
@@ -404,8 +414,21 @@ impl App {
             }
             return;
         }
-        if self.log_active() {
+        // 面板模式下日志在 Git 面板中，按键经 `Focus::GitPanel` 交给它。
+        if !self.git.panel.docked && self.log_active() {
             self.log_key(event.key);
+            return;
+        }
+        // 「未提交的更改」：当前段里有光标或选区时按键交给它，否则滚动整个标签。
+        if self.combined_active() {
+            if self.combined_caret()
+                && self
+                    .in_combined_current(|app| app.on_key_editor(event, cmd))
+                    .is_some()
+            {
+                return;
+            }
+            self.diff_key(event.key, cmd);
             return;
         }
         if self.hex_active() {
@@ -648,7 +671,8 @@ impl App {
     ///
     /// `↑` `↓` 移动选中项并显示选中的匹配，`⌘↑` 回到输入框，`Home` `End` 选中第一行、
     /// 最后一行，`PageUp` `PageDown` 翻一页，
-    /// `←` `→` 折叠或展开文件，回车打开并将焦点移到编辑区，
+    /// `←` `→` 折叠或展开目录、文件（已经折叠、展开时回到上一级、进到第一行），回车打开并将焦点
+    /// 移到编辑区，
     /// 空格打开但焦点留在列表，`⌫` 从结果中移除。
     fn on_key_results(&mut self, event: &KeyEvent) {
         self.results_key(&event.logical_key);
@@ -681,22 +705,40 @@ impl App {
                 let page = self.result_page();
                 self.jump_result(selected.map_or(0, |i| i.saturating_sub(page)));
             }
-            Key::Named(NamedKey::ArrowLeft) => match row {
-                Some(ResultRow::File(f)) => self.set_result_collapsed(f, true),
-                // 在匹配上按 `←` 回到该匹配所在文件的那一行。
-                Some(ResultRow::Match(f, _)) => {
-                    let path = self.panels.global.engine.results[f].path.clone();
-                    self.panels.global.selected = Some((path, None));
+            // 同文件树：展开着的目录、文件先折叠，已经折叠（或是匹配）时回到上一级。
+            Key::Named(NamedKey::ArrowLeft) => match (row, selected) {
+                (Some(ResultRow::Dir(_) | ResultRow::File(_)), Some(i))
+                    if !self.result_row_collapsed(i) && self.result_row_has_children(i) =>
+                {
+                    self.fold_result_row(i, true, false);
                 }
-                None => {}
+                (Some(_), Some(i)) => {
+                    if let Some(parent) = self.panels.global.parent_row(i) {
+                        self.panels.global.select_row(parent);
+                        self.scroll_result_into_view(parent);
+                    }
+                }
+                _ => {}
             },
-            Key::Named(NamedKey::ArrowRight) => {
-                if let Some(ResultRow::File(f)) = row {
-                    self.set_result_collapsed(f, false);
+            // 折叠着的先展开，已经展开时进到第一行。
+            Key::Named(NamedKey::ArrowRight) => match (row, selected) {
+                (Some(ResultRow::Dir(_) | ResultRow::File(_)), Some(i))
+                    if self.result_row_collapsed(i) =>
+                {
+                    self.fold_result_row(i, false, false);
                 }
-            }
+                (Some(ResultRow::Dir(_) | ResultRow::File(_)), Some(i))
+                    if self.result_row_has_children(i) =>
+                {
+                    self.step_result(1, false);
+                    self.browse_result();
+                }
+                _ => {}
+            },
             Key::Named(NamedKey::Enter | NamedKey::Space) => match (row, selected) {
-                (Some(ResultRow::File(_)), Some(i)) => self.click_result(i, false),
+                (Some(ResultRow::Dir(_) | ResultRow::File(_)), Some(i)) => {
+                    self.click_result(i, false);
+                }
                 (Some(ResultRow::Match(..)), Some(i)) => {
                     // 回车在普通标签中打开并进入编辑区；空格留在结果列表，按预览标签的设置打开。
                     let enter = matches!(key, Key::Named(NamedKey::Enter));
@@ -1305,8 +1347,8 @@ impl App {
 
     /// 处理输入法事件 `ime`。
     ///
-    /// 组字中的文本（`Preedit`）暂存起来用于显示；提交的文本（`Commit`）插入焦点所在的
-    /// 编辑区或输入框。
+    /// 组字中的文本（`Preedit`）和其中的光标暂存起来用于显示；提交的文本（`Commit`）插入焦点
+    /// 所在的编辑区或输入框。
     pub(in crate::app) fn on_ime(&mut self, ime: Ime) {
         // 窗口内的提示框拦截按键时，输入法的文字同样不交给它下面的编辑区和输入框。
         if self.overlays.alert.is_some() {
@@ -1316,7 +1358,8 @@ impl App {
         }
         match ime {
             // 组字文字只属于焦点所在的一处，另一处的清空。
-            Ime::Preedit(text, _) => {
+            Ime::Preedit(text, cursor) => {
+                self.ime.preedit_cursor = cursor.map(|(_, end)| end);
                 if self.focus.is_field() {
                     self.ime.field_preedit = text;
                     self.ime.preedit.clear();
@@ -1351,6 +1394,14 @@ impl App {
         }
 
         self.request_redraw();
+    }
+
+    /// 返回输入法在组字文字 `text` 中的光标（字节偏移）；输入法要求隐藏光标，或位置不在 `text`
+    /// 的字符边界上时为 `None`。
+    pub(crate) fn preedit_cursor(&self, text: &str) -> Option<usize> {
+        self.ime
+            .preedit_cursor
+            .filter(|&at| text.is_char_boundary(at))
     }
 
     /// 输入法正在组字的文字，只在焦点位于 `focus` 时返回。
@@ -1427,6 +1478,9 @@ pub struct ImeState {
     pub preedit: String,
     /// 输入框中输入法正在组字的文字。
     pub field_preedit: String,
+    /// 输入法在组字文字中的光标（字节偏移），报告的是一段范围时取其终点；输入法要求隐藏光标时
+    /// 为 `None`。
+    pub(crate) preedit_cursor: Option<usize>,
     /// 输入法候选框应出现的位置。
     pub(crate) cursor: Option<winc_render::Rect>,
     pub(in crate::app) last_area: Option<winc_render::Rect>,

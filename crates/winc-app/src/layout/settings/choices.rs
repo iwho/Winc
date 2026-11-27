@@ -23,6 +23,25 @@ pub fn text_width_label(choice: winc_config::TextWidth) -> &'static str {
     }
 }
 
+/// 返回「光标样式」设置中选项 `choice` 的名字。
+pub fn cursor_style_label(choice: winc_config::CursorStyle) -> &'static str {
+    use winc_config::CursorStyle::{Block, Line, Underline};
+    match choice {
+        Line => t!("settings-cursor-style-line"),
+        Block => t!("settings-cursor-style-block"),
+        Underline => t!("settings-cursor-style-underline"),
+    }
+}
+
+/// 返回终端「右键单击」设置中选项 `choice` 的名字。
+pub fn right_click_label(choice: winc_config::TerminalRightClick) -> &'static str {
+    use winc_config::TerminalRightClick::{CopyOrPaste, Menu};
+    match choice {
+        Menu => t!("settings-terminal-right-click-menu"),
+        CopyOrPaste => t!("settings-terminal-right-click-copy-or-paste"),
+    }
+}
+
 /// 返回「光标移动」设置中选项 `choice` 的名字。
 pub fn smooth_caret_label(choice: winc_config::SmoothCaret) -> &'static str {
     use winc_config::SmoothCaret::{Gliding, Off, Snappy};
@@ -70,6 +89,14 @@ pub fn open_worktree_label(choice: winc_config::WorktreeOpen) -> &'static str {
         Ask => t!("settings-git-open-worktree-ask"),
         NewWindow => t!("settings-git-open-worktree-new"),
         CurrentWindow => t!("settings-git-open-worktree-current"),
+    }
+}
+
+/// 返回日志位置 `choice` 在设置中显示的名称。
+pub fn log_placement_label(choice: winc_config::LogPlacement) -> &'static str {
+    match choice {
+        winc_config::LogPlacement::Panel => t!("settings-git-log-placement-panel"),
+        winc_config::LogPlacement::Editor => t!("settings-git-log-placement-editor"),
     }
 }
 
@@ -132,3 +159,32 @@ pub const THEME_CHOICES: [(ThemeChoice, Label); 3] = [
     (ThemeChoice::Light, || t!("settings-theme-light")),
     (ThemeChoice::Dark, || t!("settings-theme-dark")),
 ];
+
+/// 返回 `Ctrl` 与小写字母 `c` 的组合的显示文字：macOS 上写作 `⌃V`，其他系统上写作 `Ctrl+V`；
+/// `c` 不是小写字母时为空字符串。
+pub fn ctrl_label(c: char) -> &'static str {
+    const KEYS: [&str; 26] = [
+        "Ctrl+A", "Ctrl+B", "Ctrl+C", "Ctrl+D", "Ctrl+E", "Ctrl+F", "Ctrl+G", "Ctrl+H", "Ctrl+I",
+        "Ctrl+J", "Ctrl+K", "Ctrl+L", "Ctrl+M", "Ctrl+N", "Ctrl+O", "Ctrl+P", "Ctrl+Q", "Ctrl+R",
+        "Ctrl+S", "Ctrl+T", "Ctrl+U", "Ctrl+V", "Ctrl+W", "Ctrl+X", "Ctrl+Y", "Ctrl+Z",
+    ];
+    const MAC: [&str; 26] = [
+        "⌃A", "⌃B", "⌃C", "⌃D", "⌃E", "⌃F", "⌃G", "⌃H", "⌃I", "⌃J", "⌃K", "⌃L", "⌃M", "⌃N", "⌃O",
+        "⌃P", "⌃Q", "⌃R", "⌃S", "⌃T", "⌃U", "⌃V", "⌃W", "⌃X", "⌃Y", "⌃Z",
+    ];
+    let table = if cfg!(target_os = "macos") {
+        &MAC
+    } else {
+        &KEYS
+    };
+    let index = (c as usize).wrapping_sub('a' as usize);
+    table.get(index).copied().unwrap_or("")
+}
+
+/// 返回「快捷键冲突」一行的值：交给 Vim（`vim` 为真）或编辑器。
+pub fn vim_key_owner_label(vim: bool) -> &'static str {
+    match vim {
+        true => t!("settings-vim-key-vim"),
+        false => t!("settings-vim-key-editor"),
+    }
+}

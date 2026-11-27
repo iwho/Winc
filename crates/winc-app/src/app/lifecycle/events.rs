@@ -165,8 +165,7 @@ impl ApplicationHandler<UserEvent> for App {
                 &mono,
                 &ui,
                 &terminal,
-                self.font_weight(),
-                self.terminal_font_weight(),
+                self.font_weights(),
             )
             .map(|mut renderer| {
                 let prose = super::appearance::configured_fonts(&self.config.markdown_font);
@@ -219,6 +218,7 @@ impl ApplicationHandler<UserEvent> for App {
         self.install_system_hooks();
         // 启动时恢复的目录在事件循环创建之前打开，此时才能开始监视、读取运行配置和恢复终端、侧栏。
         self.watch_folder();
+        self.watch_extra_folders();
         self.load_run_configs_for_window();
         self.restore_terminal_for_window();
         self.restore_sidebar_for_window();
@@ -372,10 +372,15 @@ impl ApplicationHandler<UserEvent> for App {
                     modifiers.lalt_state() == pressed,
                     modifiers.ralt_state() == pressed,
                 );
-                if self.terminal.open {
+                if self.terminal.open || self.terminal_in_editor() {
                     self.update_terminal_link();
                 }
                 self.update_text_link();
+                self.tab_switch_modifiers();
+                // 拖动文字时按下、松开复制键，指针在移动与复制之间切换。
+                if self.text_drop().is_some() {
+                    self.update_cursor_icon();
+                }
                 // 按住 `⌥` 时分支选择器中的「拉取」变为「拉取并变基」，提交按钮变为「提交并推送」。
                 if (self.overlays.picker.open && self.picker_has_actions()) || self.commit_shown() {
                     self.request_redraw();
@@ -460,6 +465,7 @@ impl App {
             self.reload_state();
         } else {
             self.cancel_chord();
+            self.close_tab_switch();
             let ids: Vec<DocumentId> = self.editor.documents.iter().map(|d| d.id).collect();
             self.auto_save(&ids);
             self.drop_drags();
@@ -507,6 +513,7 @@ impl App {
             UserEvent::ReleaseNotes(notes) => self.show_release_notes(notes),
             done @ (UserEvent::GitStatus
             | UserEvent::GitContent
+            | UserEvent::GitCombined
             | UserEvent::GitCommit
             | UserEvent::GitBase
             | UserEvent::GitOperated
@@ -515,6 +522,7 @@ impl App {
             | UserEvent::FolderListed
             | UserEvent::WatcherStarted
             | UserEvent::FormatPlanned
+            | UserEvent::ToolsPlanned
             | UserEvent::FileWorked
             | UserEvent::GitMergeSides
             | UserEvent::GitLog
@@ -529,7 +537,8 @@ impl App {
             | UserEvent::Counted
             | UserEvent::BackedUp
             | UserEvent::Replaced
-            | UserEvent::Wrapped) => self.finished(done),
+            | UserEvent::Wrapped
+            | UserEvent::Compared) => self.finished(done),
             UserEvent::Rediffed => self.poll_rediffs(),
             UserEvent::Outline => self.poll_outline(),
             UserEvent::GitRollback(paths, to) => self.git_rollback(paths, to),
@@ -562,6 +571,7 @@ impl App {
             }
             UserEvent::TerminalPaste(id, text) => self.confirmed_terminal_paste(id, text),
             UserEvent::TerminalUploaded(id, result) => self.terminal_uploaded(id, result),
+            UserEvent::TerminalImageSaved(id, result) => self.terminal_image_saved(id, result),
             UserEvent::TerminalQuit(ok) => {
                 if let Some(request) = self.closing.confirming.take()
                     && ok
@@ -614,6 +624,7 @@ impl App {
                 let canceled = self.copy_finished(&copying);
                 self.downloaded(outcome, canceled);
             }
+            UserEvent::PromptCopied(prompt) => self.prompt_copied(prompt),
             UserEvent::Copied(copies, failures, copying) => {
                 self.copy_finished(&copying);
                 self.copied_into_tree(copies, failures);
@@ -658,6 +669,7 @@ impl App {
             }
             UserEvent::Delete(paths, permanent) => self.delete_entries(&paths, permanent),
             UserEvent::Formatted => self.poll_formatting(),
+            UserEvent::HttpDone => self.poll_http(),
             UserEvent::ToolChoice(answer) => self.answer_tool_choice(*answer),
             UserEvent::GitTrust(root, fingerprint, trusted) => {
                 self.answer_git_trust(&root, fingerprint, trusted);

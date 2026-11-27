@@ -83,6 +83,18 @@ impl App {
         )
     }
 
+    /// 返回当前文档纵向滚动位置的上限（显示行）。
+    ///
+    /// 打字机模式下文末的行同样居中：上限放宽到光标所在行居中时的位置。
+    fn scroll_limit(&self) -> f64 {
+        let max = self.max_scroll_line();
+        let Some(doc) = self.editor.active().filter(|_| self.markdown_typewriter()) else {
+            return max;
+        };
+        let row = doc.row_at(doc.selection.head) as f64;
+        max.max(row + 0.5 - self.visible_lines() as f64 / 2.0)
+    }
+
     /// 把当前文档的滚动位置设为 `row`（显示行），不限制范围，不做平滑滚动。
     ///
     /// 进行中的平滑滚动继续滚向新的目标。
@@ -115,6 +127,14 @@ impl App {
             .is_some_and(|doc| doc.scroll_x != wanted)
         {
             self.scroll.wheel.carry_x = 0.0;
+        }
+    }
+
+    /// 视口以上的内容变高、变矮，文档 `doc` 的滚动位置随之移动了 `delta` 行后调用：正在进行的
+    /// 平滑滚动的起点一起移动，屏幕上的内容不跳。
+    pub(in crate::app) fn shift_scroll_glide(&mut self, doc: DocumentId, delta: f64) {
+        if let Some(glide) = self.scroll.glide.as_mut().filter(|g| g.doc == doc) {
+            glide.from += delta;
         }
     }
 
@@ -276,9 +296,9 @@ impl App {
         }
     }
 
-    /// 把当前文档的纵向和横向滚动位置限制在有效范围内。
+    /// 把当前文档的纵向和横向滚动位置限制在有效范围内；纵向上限见 [`Self::scroll_limit`]。
     pub(in crate::app) fn clamp_scroll(&mut self) {
-        let max_scroll = self.max_scroll_line();
+        let max_scroll = self.scroll_limit();
 
         let Some(doc) = self.editor.active_mut() else {
             return;

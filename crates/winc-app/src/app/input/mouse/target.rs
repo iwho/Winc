@@ -57,6 +57,38 @@ impl App {
         !crate::layout::in_control_column(&self.caption_controls(), TAB_GAP, x)
     }
 
+    /// 返回 Git 面板及其上沿的间距中 (`x`, `y`) 处的目标：上沿、标题行的按钮和标签、日志的滚动条
+    /// 和可点击的部分、详情中的文字，都不是时为面板本身；不在面板中时为 `None`。
+    fn git_panel_target(&self, x: f32, y: f32) -> Option<Target> {
+        use crate::app::git::panel::PanelHit;
+        if self.layout.git_divider.contains(x, y) {
+            return Some(Target::GitPanel(PanelHit::Divider));
+        }
+        if !self.in_git_panel(x, y) {
+            return None;
+        }
+        Some(self.git_panel_part(x, y))
+    }
+
+    /// 返回 Git 面板中 (`x`, `y`) 处的部分，见 [`Self::git_panel_target`]。
+    fn git_panel_part(&self, x: f32, y: f32) -> Target {
+        use crate::app::git::panel::PanelHit;
+        if let Some(hit) = hit(&self.hits.git_panel, x, y) {
+            return Target::GitPanel(hit);
+        }
+        let log_bar = |bar| matches!(bar, Scrollbar::GitPanel | Scrollbar::LogBranches);
+        if let Some((bar, grab)) = self.scrollbar_at(x, y).filter(|(bar, _)| log_bar(*bar)) {
+            return Target::Scrollbar(bar, grab);
+        }
+        if let Some(target) = hit(&self.hits.log, x, y) {
+            return Target::Log(target);
+        }
+        if self.log_parts().details.contains(x, y) {
+            return Target::LogText;
+        }
+        Target::GitPanel(PanelHit::Body)
+    }
+
     /// 返回顶栏范围内按客户区处理的控件矩形（逻辑像素）。
     ///
     /// 结果为布局坐标；交给窗口过程前由 `window_hit_test` 乘以界面缩放倍数。
@@ -83,6 +115,7 @@ impl App {
         client.extend(self.sidebar_tabs().iter().map(|(r, _)| *r));
         client.extend(self.hits.tree_tools.iter().map(|(r, _)| *r));
         client.extend(self.hits.terminal.iter().map(|(r, _)| *r));
+        client.extend(self.hits.terminal_groups.iter().flatten().map(|(r, _)| *r));
         client.extend(self.agent_caption_controls());
         client.extend(self.hits.merge.iter().map(|(r, _)| *r));
         client.extend(self.hits.crumbs.iter().map(|(r, _)| *r));
@@ -123,6 +156,9 @@ impl App {
         if self.browser_page().is_some() {
             controls.push(l.browser);
         }
+        if self.editor.active().is_some_and(|doc| doc.terminal) {
+            controls.push(l.terminal_return);
+        }
         controls
     }
 
@@ -133,6 +169,11 @@ impl App {
             || self.overlays.form_dialog.is_some()
             || self.overlays.picker.open
             || self.panels.name_input.is_some()
+    }
+
+    /// 窗口内的提示框或菜单是否处于打开状态；二者位于最上层且为模态，打开期间下方的部件不响应鼠标。
+    pub(in crate::app) fn modal_open(&self) -> bool {
+        self.overlays.alert.is_some() || self.popup().is_some()
     }
 
     /// 返回在 (`x`, `y`) 落指时立即开始的窗口操作：顶栏空白处移动窗口，窗口边缘调整大小。
@@ -185,9 +226,12 @@ impl App {
                 | Target::Minimap
                 | Target::Splitter
                 | Target::TerminalDivider
+                | Target::GitPanel(crate::app::git::panel::PanelHit::Divider)
                 | Target::OutlineDivider
                 | Target::SplitDivider
                 | Target::PaneDivider(_)
+                | Target::TerminalSplit(_)
+                | Target::TerminalGroupSplit(_)
                 | Target::Log(crate::app::git::log::LogTarget::Divider)
                 | Target::Log(crate::app::git::log::LogTarget::BranchesEdge)
                 | Target::Log(crate::app::git::log::LogTarget::AuthorEdge)
@@ -198,8 +242,8 @@ impl App {
     /// 返回窗口坐标 (`x`, `y`)（逻辑像素）处的悬停目标。
     pub(in crate::app) fn hover_at(&self, x: f32, y: f32) -> Hover {
         let l = &self.layout;
-        // 窗口内的菜单位于最上层，打开期间下方的部件不产生悬停。
-        if self.popup().is_some() {
+        // 窗口内的提示框和菜单位于最上层，打开期间下方的部件不产生悬停。
+        if self.modal_open() {
             return Hover::None;
         }
 
@@ -253,7 +297,9 @@ impl App {
             Target::MarkdownToc(target) => Hover::MarkdownToc(target),
             Target::MarkdownText(Some(link)) => Hover::MarkdownLinkText(link),
             Target::ImageHandle => Hover::ImageHandle,
-            Target::MarkdownText(None) | Target::PdfThumb(_) | Target::Picture => Hover::None,
+            Target::MarkdownText(None) | Target::PdfThumb(_) | Target::Picture | Target::Table => {
+                Hover::None
+            }
             Target::PdfTool(tool) => Hover::PdfTool(tool),
             Target::LatexStatus => Hover::LatexStatus,
             Target::LatexProblem(line) => Hover::LatexProblem(line),
@@ -265,18 +311,24 @@ impl App {
             Target::Tree(row) => row.map_or(Hover::None, Hover::TreeRow),
             Target::Placeholder(action) => Hover::Placeholder(action),
             Target::Diff(target) => Hover::Diff(target),
+            Target::Combined(target) => Hover::Combined(target),
+            Target::CombinedBody => Hover::None,
             Target::Log(target) => Hover::Log(target),
             Target::Start(action) => Hover::Start(action),
             Target::Sticky(row) => Hover::Sticky(row.depth),
             Target::Folded(line) => Hover::Folded(line),
+            Target::HttpRun(line) => Hover::HttpRun(line),
             Target::LongLine(line) => Hover::LongLine(line),
             Target::Blame(line) => Hover::Blame(line),
             Target::ChangeMark(hunk) => Hover::ChangeMark(hunk),
             Target::Gutter => Hover::Gutter,
             Target::TerminalDivider => Hover::TerminalDivider,
+            Target::GitPanel(hit) => Hover::GitPanel(hit),
             Target::OutlineDivider => Hover::OutlineDivider,
             Target::SplitDivider => Hover::SplitDivider,
             Target::PaneDivider(index) => Hover::PaneDivider(index),
+            Target::TerminalSplit(index) => Hover::TerminalSplit(index),
+            Target::TerminalGroupSplit(index) => Hover::TerminalGroupSplit(index),
             Target::TerminalHeader(hit) => Hover::TerminalHeader(hit),
             Target::TerminalBlock(hit) => Hover::TerminalBlock(hit),
             // 遮挡下方但没有按钮的区域，以及没有悬停效果的部件：输入条、顶栏空白、编辑区文字。
@@ -302,8 +354,23 @@ impl App {
         self.active_shows_text() && matches!(self.target_at(x, y), Target::Editor)
     }
 
+    /// 鼠标在 `(x, y)` 时交不交给「未提交的更改」中的段：落在某一段的正文上，上面没有面板、
+    /// 对话框、查找栏、滚动条等；按着鼠标拖动时一直交给按下的那一段。
+    pub(in crate::app) fn combined_takes_pointer(&self, x: f32, y: f32) -> bool {
+        if self.combined_dragging() {
+            return true;
+        }
+        !self.settings.open
+            && self.overlays.form_dialog.is_none()
+            && matches!(self.target_at(x, y), Target::CombinedBody | Target::Diff(_))
+    }
+
     pub(super) fn target_at(&self, x: f32, y: f32) -> Target {
         let l = &self.layout;
+        // 提示框和菜单自身的悬停与点击由调用方先行处理。
+        if self.modal_open() {
+            return Target::Blocked;
+        }
         // 窗口最外圈的细边用于改变窗口大小，位于所有部件之上；窗口按钮位于顶栏右端。
         if let Some(direction) = self.resize_edge_at(x, y) {
             return Target::ResizeEdge(direction);
@@ -311,14 +378,19 @@ impl App {
         if let Some(control) = self.window_control_at(x, y) {
             return Target::WindowControl(control);
         }
+        // 最大化的 Git 面板盖住了编辑区：编辑区里的补全、选区工具、改动卡片和冲突按钮在面板下面，
+        // 不响应；提示条、快速打开面板和查找对话框仍在面板上面。
+        let under_panel = self.git.panel.full && self.in_git_panel(x, y);
         // 链接地址的补全列表浮在文字上。
         if let Some(card) = self.hits.suggest_card
             && card.contains(x, y)
+            && !under_panel
         {
             return hit(&self.hits.suggest, x, y).map_or(Target::Blocked, Target::Suggest);
         }
         if let Some(card) = self.hits.selection_card
             && card.contains(x, y)
+            && !under_panel
         {
             let tool = hit(&self.hits.selection_tools, x, y);
             return tool.map_or(Target::Blocked, Target::SelectionTool);
@@ -326,6 +398,7 @@ impl App {
         // 浮于编辑区之上的卡片和提示条：只响应其中的按钮，卡片的其余区域遮挡下方的部件。
         if let Some(card) = self.hits.changes_card
             && card.contains(x, y)
+            && !under_panel
         {
             return hit(&self.hits.changes, x, y).map_or(Target::Blocked, Target::Change);
         }
@@ -340,14 +413,15 @@ impl App {
             return Target::Blocked;
         }
         // 合并冲突的按钮既位于卡片上，也位于冲突标记行上。
-        if let Some(target) = hit(&self.hits.merge, x, y) {
+        if let Some(target) = hit(&self.hits.merge, x, y).filter(|_| !under_panel) {
             return Target::Merge(target);
         }
-        if self.hits.merge_card.is_some_and(|card| card.contains(x, y)) {
+        if self.hits.merge_card.is_some_and(|card| card.contains(x, y)) && !under_panel {
             return Target::Blocked;
         }
         if let Some((card, buttons)) = &self.hits.conflict_card
             && card.contains(x, y)
+            && !under_panel
         {
             return buttons
                 .iter()
@@ -362,6 +436,10 @@ impl App {
         if let Some(part) = self.search_dialog_part_at(x, y) {
             return Target::SearchDialog(part);
         }
+        // Git 面板最大化时盖在侧栏、编辑区和终端上面：先于它们判断。
+        if let Some(target) = self.git_panel_target(x, y) {
+            return target;
+        }
         if self.hits.tree_more.is_some_and(|more| more.contains(x, y)) {
             return Target::TreeMore;
         }
@@ -372,7 +450,12 @@ impl App {
         let side = |bar| {
             matches!(
                 bar,
-                Scrollbar::Panel | Scrollbar::Commit | Scrollbar::Outline | Scrollbar::LogBranches
+                Scrollbar::Panel
+                    | Scrollbar::Commit
+                    | Scrollbar::CommitHistory
+                    | Scrollbar::GitPanel
+                    | Scrollbar::Outline
+                    | Scrollbar::LogBranches
             )
         };
         if let Some((bar, grab)) = self.scrollbar_at(x, y).filter(|(bar, _)| side(*bar))
@@ -389,7 +472,8 @@ impl App {
             return Target::Panel(hover);
         }
         // 跳转条绘制在查找条之上（窄窗口中两者会重叠）；正在输入名称的行位于文件树中。
-        if (self.bars.goto_input.is_some() && self.prompt_bar().contains(x, y))
+        if (self.bars.goto_input.is_some()
+            && self.hits.prompt_bar.is_some_and(|r| r.contains(x, y)))
             || self.name_input_rect().is_some_and(|r| r.contains(x, y))
         {
             return Target::Prompt;
@@ -397,9 +481,9 @@ impl App {
         if l.search.contains(x, y) {
             return Target::Search;
         }
-        // 展开的全名可以画在分隔条上，分隔条仍然可以拖动；鼠标停在分隔条上时全名保持展开。
+        // 写全名的那一行画在分隔条之上，在这一行的高度内按下作用于这一行；其他高度拖动分隔条。
         let over_row = self.over_tree_overflow_row(y);
-        if self.panels.sidebar.visible && l.splitter.contains(x, y) {
+        if self.on_sidebar_splitter(x, y) {
             return Target::Splitter;
         }
         if let Some(tool) = hit(&self.hits.tree_tools, x, y) {
@@ -431,6 +515,22 @@ impl App {
         // 切换到非网页文件后，按钮收起的动画过程中不响应点击。
         if l.browser.contains(x, y) && self.browser_page().is_some() {
             return Target::Browser;
+        }
+        if l.terminal_return.contains(x, y) && self.editor.active().is_some_and(|doc| doc.terminal)
+        {
+            return Target::TerminalHeader(crate::app::terminal::HeaderHit::Panel);
+        }
+        if l.terminal_return.contains(x, y)
+            && self.editor.active().is_some_and(|doc| doc.log.is_some())
+        {
+            return Target::GitPanel(crate::app::git::panel::PanelHit::ToPanel);
+        }
+        if self.field_at(x, y) == Some(Focus::TerminalRename)
+            && self.editor.active().is_some_and(|doc| doc.terminal)
+        {
+            return Target::TerminalHeader(crate::app::terminal::HeaderHit::Tab(
+                self.terminal.active,
+            ));
         }
         if let Some((index, on_close)) = self.tab_at(x, y) {
             return Target::Tab(index, on_close);
@@ -472,7 +572,13 @@ impl App {
         if let Some(index) = self.pane_divider_at(x, y) {
             return Target::PaneDivider(index);
         }
-        if let Some(hit) = hit(&self.hits.terminal, x, y) {
+        if let Some(index) = self.terminal_group_split_at(x, y) {
+            return Target::TerminalGroupSplit(index);
+        }
+        if let Some(index) = self.terminal_split_at(x, y) {
+            return Target::TerminalSplit(index);
+        }
+        if let Some(hit) = hit(self.terminal_hits_at(x, y), x, y) {
             return Target::TerminalHeader(hit);
         }
         if y < TOP_BAR_END {
@@ -487,7 +593,7 @@ impl App {
         if let Some(part) = self.docked_part_at(x, y) {
             return Target::SearchDock(part);
         }
-        if l.terminal.contains(x, y) {
+        if self.terminal_contains(x, y) {
             if self
                 .terminal_tab_list()
                 .is_some_and(|list| list.contains(x, y))
@@ -507,6 +613,17 @@ impl App {
         }
         if let Some(target) = hit(&self.hits.diff, x, y) {
             return Target::Diff(target);
+        }
+        if let Some(target) = hit(&self.hits.combined, x, y) {
+            return Target::Combined(target);
+        }
+        // 「未提交的更改」标签下面是一个空文档：点在别处不落到它上面。在某一段的部件上时按
+        // 差异的部件悬停（显示行勾选框、加深展开按钮）。
+        if self.combined_active() && self.layout.editor.contains(x, y) {
+            return match self.combined_section_target(x, y) {
+                Some(target) => Target::Diff(target),
+                None => Target::CombinedBody,
+            };
         }
         if let Some(target) = hit(&self.hits.log, x, y) {
             return Target::Log(target);
@@ -531,6 +648,9 @@ impl App {
         }
         if let Some(hunk) = self.change_mark_at(x, y) {
             return Target::ChangeMark(hunk);
+        }
+        if let Some(line) = hit(&self.hits.http_runs, x, y) {
+            return Target::HttpRun(line);
         }
         if self.editor.active.is_some()
             && self.active_shows_text()
@@ -593,6 +713,9 @@ impl App {
         if self.picture_at(x, y) {
             return Target::Picture;
         }
+        if self.active_shows_text() && self.table_at(x, y) {
+            return Target::Table;
+        }
         if l.editor.contains(x, y) && self.editor.active.is_some() {
             return Target::Editor;
         }
@@ -623,6 +746,15 @@ impl App {
                 return Some((Scrollbar::Panel, grab(y, thumb.y, thumb.h)));
             }
         }
+        // Git 面板中日志的提交列表。
+        if self.git_panel_shown() {
+            let list = self.log_parts().list;
+            if list.contains(x, y) && x >= list.right() - SCROLLBAR_HIT {
+                let (scroll, content) = self.panel_log_extent();
+                let thumb = scrollbar_thumb(list, scroll, content)?;
+                return Some((Scrollbar::GitPanel, grab(y, thumb.y, thumb.h)));
+            }
+        }
         // 日志左侧的分支面板。
         if self.log_active() {
             let list = self.log_parts().branches;
@@ -640,6 +772,16 @@ impl App {
                 let thumb = scrollbar_thumb(list, self.panels.outline.scroll, content)?;
                 return Some((Scrollbar::Outline, grab(y, thumb.y, thumb.h)));
             }
+        }
+        // 提交视图中提交历史一组的各行。
+        if self.commit_shown()
+            && let Some(rows) = self.history_rows_area()
+            && rows.contains(x, y)
+            && x >= rows.right() - SCROLLBAR_HIT
+        {
+            let content = self.history_max_scroll() + rows.h;
+            let thumb = scrollbar_thumb(rows, self.git.commit.history.scroll, content)?;
+            return Some((Scrollbar::CommitHistory, grab(y, thumb.y, thumb.h)));
         }
         // Git 侧栏里正在显示的改动列表。
         if self.commit_shown() {
@@ -827,19 +969,25 @@ impl App {
         self.track_tree_segment();
     }
 
-    /// `(x, y)` 是否位于编辑区右上角的卡片（冲突卡片、提示条）上。
-    ///
-    /// 卡片浮于文字之上，点击、右键和指针样式都不应作用于下方的文字。
-    pub(in crate::app) fn over_corner_card(&self, x: f32, y: f32) -> bool {
-        self.hits
-            .notice_card
-            .is_some_and(|card| card.contains(x, y))
-            || self.hits.merge_card.is_some_and(|card| card.contains(x, y))
-            || self
-                .hits
-                .conflict_card
-                .as_ref()
-                .is_some_and(|(card, _)| card.contains(x, y))
+    /// `(x, y)` 处最上层的部件是否遮挡下方且自身没有右键菜单：卡片、补全列表、工具栏、标题
+    /// 列表、在文件中查找的对话框和底部面板的「搜索」标签，以及输入条。右键点在这些部件上时
+    /// 不弹出下方部件的菜单。
+    pub(in crate::app) fn blocks_context_menu(&self, x: f32, y: f32) -> bool {
+        matches!(
+            self.target_at(x, y),
+            Target::Blocked
+                | Target::NoticeButton
+                | Target::Change(_)
+                | Target::Merge(_)
+                | Target::Conflict(_)
+                | Target::Suggest(_)
+                | Target::SelectionTool(_)
+                | Target::MarkdownToc(_)
+                | Target::SearchDialog(_)
+                | Target::SearchDock(_)
+                | Target::Prompt
+                | Target::Search
+        )
     }
 
     /// 根据鼠标位置和拖动状态更新鼠标指针的样式；鼠标在其他窗格上时按那个窗格判断。
@@ -849,8 +997,22 @@ impl App {
 
     fn place_cursor_icon(&mut self) {
         let (x, y) = self.pointer.mouse;
-        if !self.settings.open
-            && self.overlays.form_dialog.is_none()
+        // 提示框和菜单可叠加于设置与对话框之上，故先行判断，打开期间一律显示箭头。
+        if self.modal_open() {
+            self.set_cursor_icon(CursorIcon::Default);
+            return;
+        }
+        // 拖动选中的文字时显示箭头，按住复制键时显示复制样式。
+        if matches!(self.pointer.drag, Drag::MoveText { moving: true, .. }) {
+            let copy = self.drop_copies();
+            self.set_cursor_icon(if copy {
+                CursorIcon::Copy
+            } else {
+                CursorIcon::Default
+            });
+            return;
+        }
+        if !self.covered_by_overlay(x, y)
             && (matches!(self.pointer.drag, Drag::AgentDivider { .. })
                 || self.agent_rects().divider.contains(x, y))
         {
@@ -933,26 +1095,13 @@ impl App {
             return;
         }
 
-        // 差异两侧和 Markdown 预览按最上层的目标判断：滚动条、折叠的一段、标题列表、工具栏、
-        // 盖在上面的卡片和面板，以及链接处不显示文本光标；拖选期间一直显示。
-        let in_text = self.editor.active.is_some()
-            && self.active_shows_text()
-            && !matches!(
-                self.pointer.hover,
-                Hover::TreeRow(_)
-                    | Hover::Sticky(_)
-                    | Hover::Folded(_)
-                    | Hover::LongLine(_)
-                    | Hover::Scrollbar(_)
-            )
-            && self.layout.text.contains(x, y)
-            && !self.layout.search.contains(x, y)
-            && !(self.overlays.picker.open && self.layout.picker.contains(x, y))
-            && !self.over_corner_card(x, y)
+        // 源代码、差异、Markdown 预览和日志详情仅在最上层的目标为文字时显示文本光标；拖选差异、
+        // 预览和日志详情期间保持显示。
+        let target = self.target_at(x, y);
+        let in_text = (self.active_shows_text() && self.layout.text.contains(x, y)
+            || self.over_diff_text(x, y))
             && x < self.layout.editor.right() - SCROLLBAR_HIT
-            || self.over_diff_text(x, y)
-                && x < self.layout.editor.right() - SCROLLBAR_HIT
-                && matches!(self.target_at(x, y), Target::Editor);
+            && matches!(target, Target::Editor);
         // 日志详情中可选择的文字上（不含可点击的提交号和文件）显示文本光标。
         let in_field = self.field_at(x, y).is_some()
             || matches!(
@@ -963,11 +1112,8 @@ impl App {
                     | Drag::DiffSelectRead { .. }
                     | Drag::DiffColumns { .. }
             )
-            || (self.preview.markdown.area.contains(x, y)
-                && matches!(self.target_at(x, y), Target::MarkdownText(None)))
-            || (self.log_active()
-                && crate::layout::hit(&self.hits.log, x, y).is_none()
-                && self.log_text_at(x, y, false).is_some());
+            || matches!(target, Target::MarkdownText(None))
+            || (matches!(target, Target::LogText) && self.log_text_at(x, y, false).is_some());
 
         let icon = if let Hover::ResizeEdge(direction) = self.pointer.hover {
             resize_cursor(direction)
@@ -995,6 +1141,19 @@ impl App {
                 winc_editor::panes::Axis::Row => CursorIcon::ColResize,
                 winc_editor::panes::Axis::Column => CursorIcon::RowResize,
             }
+        } else if self.active_terminal_split().is_some()
+            || self.active_terminal_group_split().is_some()
+        {
+            // 终端面板在右侧时各终端上下排，分隔线是横的。
+            if self.terminal_right() {
+                CursorIcon::RowResize
+            } else {
+                CursorIcon::ColResize
+            }
+        } else if matches!(self.pointer.drag, Drag::GitPanelDivider { .. })
+            || self.pointer.hover == Hover::GitPanel(crate::app::git::panel::PanelHit::Divider)
+        {
+            CursorIcon::RowResize
         } else if matches!(self.pointer.drag, Drag::TerminalDivider { .. })
             || self.pointer.hover == Hover::TerminalDivider
         {
@@ -1039,7 +1198,7 @@ impl App {
             CursorIcon::Pointer
         } else if matches!(self.pointer.drag, Drag::Picture { .. }) {
             CursorIcon::Grabbing
-        } else if self.picture_pannable() && matches!(self.target_at(x, y), Target::Picture) {
+        } else if self.picture_pannable() && matches!(target, Target::Picture) {
             // 图片超出预览区域时可以按住拖动。
             CursorIcon::Grab
         } else if in_text || in_field {
@@ -1149,6 +1308,8 @@ pub(super) enum Target {
     Blame(usize),
     /// 行号栏上标出的改动，参数为改动块的序号。
     ChangeMark(usize),
+    /// `.http` 文件行号栏中发送请求的按钮，参数为请求行的行号（从 0 起）。
+    HttpRun(usize),
     /// 行号栏（包含折叠箭头）。
     Gutter,
     /// 日志详情中的文字。
@@ -1156,20 +1317,32 @@ pub(super) enum Target {
     Editor,
     /// 图片或 SVG 的预览区域。
     Picture,
+    /// 分栏时右侧的表格：点击后键盘作用于表格。只看预览时表格位于编辑区，属于 [`Target::Editor`]。
+    Table,
     /// 终端面板。
     Terminal,
     /// 编辑区与终端面板之间的间距。
     TerminalDivider,
+    /// Git 面板中可点击的位置。
+    GitPanel(crate::app::git::panel::PanelHit),
     /// 文件视图中大纲标题行的上沿。
     OutlineDivider,
     /// 分栏预览中间的分隔线。
     SplitDivider,
     /// 编辑区窗格之间的第几道分隔线。
     PaneDivider(usize),
+    /// 拆分的终端标签中第几条分隔线。
+    TerminalSplit(usize),
+    /// 终端分栏之间的第几条分隔线。
+    TerminalGroupSplit(usize),
     /// 编辑区右侧的缩略图。
     Minimap,
     /// 终端面板标签栏上的按钮。
     TerminalHeader(crate::app::terminal::HeaderHit),
+    /// 「未提交的更改」标签上的段头、按钮。
+    Combined(crate::app::git::combined::CombinedHit),
+    /// 「未提交的更改」标签里没有可点的东西的地方。
+    CombinedBody,
     /// 终端中命令块的色带与吸顶的命令行。
     TerminalBlock(crate::app::terminal::BlockHit),
     None,

@@ -45,9 +45,10 @@ pub(crate) use editor::sticky::{place_sticky_rows, sticky_limit};
 pub(crate) use git::branch::picker::{GitAnchor, PickerPart};
 pub(crate) use git::changes::{ChangeTarget, MARK_W, mark_x, ruler_rows};
 pub(crate) use git::commit::{
-    COMMIT_ROW, CommitGroup, CommitLabels, CommitName, CommitOverflow, CommitParts, CommitRow,
-    CommitRows, CommitScope, CommitSort, CommitTarget, DRAWER_TOP, MESSAGE_LINE, MESSAGE_PAD,
-    OtherGroup, OtherRow, StashLine, StashView, SyncState, WorktreeLine,
+    ActionStrip, COMMIT_ROW, CardState, CommitGroup, CommitLabels, CommitName, CommitOverflow,
+    CommitParts, CommitRow, CommitRows, CommitScope, CommitSort, CommitTarget, DRAWER_TOP,
+    HistoryLine, HistoryTarget, MESSAGE_LINE, MESSAGE_PAD, OtherGroup, OtherRow, PeekView,
+    StashLine, SyncState, WorktreeLine,
 };
 pub(crate) use input::context_menu::{
     CHECK_COLUMN, ICON_COLUMN, MenuIcon, POPUP_PAD, POPUP_TEXT_X, PopupLevel, PopupMenu, PopupRow,
@@ -67,6 +68,7 @@ pub(crate) use lifecycle::title_bar::resize_cursor;
 pub(crate) use lifecycle::wallpaper::Layer as WallpaperLayer;
 use lifecycle::window::frame_interval;
 pub(crate) use scroll::ScrollTarget;
+pub(crate) use settings::rulers_text;
 pub(crate) use settings::shortcuts::KeyEdit;
 pub use settings::{DialogCache, SettingsState};
 pub(crate) use status::language_picker::LanguageRow;
@@ -206,6 +208,8 @@ pub enum UserEvent {
     AttachFolder(PathBuf),
     /// 后台格式化已有结果。
     Formatted,
+    /// 后台发送的 `.http` 请求已有结果。
+    HttpDone,
     /// 提示框中回答了是否允许运行项目自带的格式化工具。
     ToolChoice(Box<ToolAnswer>),
     /// 确认框中同意运行参数所指的运行配置。
@@ -253,6 +257,8 @@ pub enum UserEvent {
     ),
     /// 拖进文件树的文件和目录已在后台复制完成：各个副本的路径、复制失败的说明，以及这次复制。
     Copied(Vec<PathBuf>, Vec<String>, Arc<winc_editor::Copying>),
+    /// 文件树中选中的文件已在后台整理成提示词，待写入剪贴板。
+    PromptCopied(winc_editor::Prompt),
     /// 窗口已关闭时点击了程序坞中的图标（macOS）：重新显示窗口。
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Reopen,
@@ -260,6 +266,8 @@ pub enum UserEvent {
     GitStatus,
     /// 后台已取得某个文件在 Git 中的版本，可以打开差异。
     GitContent,
+    /// 后台比较完了「未提交的更改」标签中的一段。
+    GitCombined,
     /// 后台已重新比较完一个差异标签。
     Rediffed,
     /// 后台已提取完大纲的符号。
@@ -310,8 +318,10 @@ pub enum UserEvent {
     RemoteShells,
     /// 后台的文件操作（新建、改名、移动、删除）已完成。
     FileWorked,
-    /// 后台为远端文件的格式化选好了工具。
+    /// 后台为一次格式化选好了工具。
     FormatPlanned,
+    /// 后台为设置的格式化页算出了工具选择。
+    ToolsPlanned,
     /// 连接远端主机的 `ssh` 发来了输入请求。
     RemoteQuestion,
     /// 后台到远端主机的连接到达了新的阶段。
@@ -343,6 +353,8 @@ pub enum UserEvent {
     TerminalPaste(u16, String),
     /// 要粘贴到远端终端标签的图片或文件已在后台传到那台主机：标签，那里的路径或失败的原因。
     TerminalUploaded(u16, Result<Vec<String>, String>),
+    /// 要粘贴到本机终端标签的图片已在后台存为文件：标签，文件的路径或失败的原因。
+    TerminalImageSaved(u16, Result<PathBuf, String>),
     /// 确认框中确认日志中对一个提交的操作（签出该提交、硬重置）。
     GitLogConfirmed(git::log::LogConfirmed),
     /// 确认框中确认移除参数所指的工作树；第二个参数是一并删除的分支（勾选「同时删除分支」时）。
@@ -382,6 +394,8 @@ pub enum UserEvent {
     Replaced,
     /// 大文件的后台断行已完成。
     Wrapped,
+    /// 当前文档与剪贴板、已保存的版本的比较已在后台完成。
+    Compared,
     /// 确认框上确认了全部替换；参数为弹出确认框时结果列表中的匹配总数。
     ReplaceAllConfirmed(usize),
 }
@@ -475,6 +489,8 @@ pub enum Focus {
     Outline,
     /// 日志标签标题栏的筛选输入框。
     LogFilter,
+    /// Git 面板中的日志（面板模式下日志获得焦点时）。
+    GitPanel,
     /// 功能对话框（新建工作树）里的输入框。
     Dialog,
 }
@@ -570,12 +586,20 @@ pub enum Hover {
     Splitter,
     /// 编辑区和终端面板之间的间距（拖动可调整面板大小）。
     TerminalDivider,
+    /// Git 面板中可点击的位置：标题行的标签和按钮、上沿的间距。
+    GitPanel(git::panel::PanelHit),
     /// 文件视图中大纲标题行的上沿（上下拖动可调整大纲的高度）。
     OutlineDivider,
     /// 分栏预览中间的分隔线（左右拖动可调整两侧的宽度）。
     SplitDivider,
     /// 编辑区窗格之间的第几道分隔线（拖动可调整两侧的大小）。
     PaneDivider(usize),
+    /// 拆分的终端标签中第几条分隔线（见 `App::terminal_split_at`）。
+    TerminalSplit(usize),
+    /// 终端分栏之间第几条分隔线（见 `App::terminal_group_split_at`）。
+    TerminalGroupSplit(usize),
+    /// 「未提交的更改」标签上的段头、按钮。
+    Combined(git::combined::CombinedHit),
     /// 终端面板标签栏上的标签、关闭按钮、「+」和位置按钮。
     TerminalHeader(terminal::HeaderHit),
     /// 终端中命令块的色带与吸顶的命令行。
@@ -605,6 +629,8 @@ pub enum Hover {
     Gutter,
     /// 已折叠行末尾的 `⋯`，参数是行号（从 0 起）。
     Folded(usize),
+    /// `.http` 文件行号栏中发送请求的按钮，参数是请求行的行号（从 0 起）。
+    HttpRun(usize),
     /// 超长行截断说明中的「显示整行」，参数是行号（从 0 起）。
     LongLine(usize),
     /// 滚动条的可点击区域。
@@ -639,18 +665,30 @@ impl Hover {
                     terminal::HeaderHit::Position
                         | terminal::HeaderHit::SearchDialog
                         | terminal::HeaderHit::Maximize
+                        | terminal::HeaderHit::Editor
+                        | terminal::HeaderHit::Panel
+                        | terminal::HeaderHit::Split
                         | terminal::HeaderHit::ShellMenu
                         | terminal::HeaderHit::Find(_)
                         | terminal::HeaderHit::Hide
                         | terminal::HeaderHit::Run(_),
                 )
                 | Hover::Status(
-                    StatusItem::Terminal
+                    StatusItem::Position
+                        | StatusItem::Terminal
+                        | StatusItem::GitPanel
                         | StatusItem::Agent
                         | StatusItem::Remote
                         | StatusItem::Settings
                 )
                 | Hover::TreeMore
+                | Hover::GitPanel(
+                    git::panel::PanelHit::ToEditor
+                        | git::panel::PanelHit::ToPanel
+                        | git::panel::PanelHit::Maximize
+                        | git::panel::PanelHit::Hide
+                )
+                | Hover::Commit(CommitTarget::Generate)
                 | Hover::SidebarButton
                 | Hover::Tab(..)
                 | Hover::TabList
@@ -693,8 +731,18 @@ impl Hover {
                 )
                 | Hover::Blame(_)
                 | Hover::PickerPart(PickerPart::Pull | PickerPart::Push | PickerPart::Fetch)
+                | Hover::Combined(
+                    git::combined::CombinedHit::OpenFile(_)
+                        | git::combined::CombinedHit::OpenDiff(_)
+                        | git::combined::CombinedHit::Previous
+                        | git::combined::CombinedHit::Next
+                        | git::combined::CombinedHit::Collapse
+                        | git::combined::CombinedHit::Layout
+                        | git::combined::CombinedHit::View
+                )
                 | Hover::Commit(
                     CommitTarget::Log
+                        | CommitTarget::History(HistoryTarget::Log | HistoryTarget::Commit(_))
                         | CommitTarget::Sync
                         | CommitTarget::Location
                         | CommitTarget::WorktreeNew
@@ -710,9 +758,18 @@ impl Hover {
                         | CommitTarget::StageFile(..)
                         | CommitTarget::GroupStage(_)
                         | CommitTarget::DirStage(..)
+                        | CommitTarget::DirRevert(_)
+                        | CommitTarget::OtherOpen(..)
+                        | CommitTarget::OtherRevert(..)
+                        | CommitTarget::OtherStage(..)
+                        | CommitTarget::OtherGroupStage(..)
+                        | CommitTarget::OtherGroupRevert(..)
+                        | CommitTarget::OtherDirRevert(_)
+                        | CommitTarget::OtherDirStage(..)
                 )
                 | Hover::Diff(
-                    DiffTarget::Previous
+                    DiffTarget::Combined
+                        | DiffTarget::Previous
                         | DiffTarget::Next
                         | DiffTarget::PreviousFile
                         | DiffTarget::NextFile
@@ -780,6 +837,13 @@ enum Drag {
     AddSelect {
         origin: usize,
     },
+    /// 在选中的文字上按下（见 `App::press_on_selection`）：`press` 是按下处的窗口坐标，`at` 是
+    /// 没有拖动就松开时放置光标的位置（字符偏移），`moving` 表示已越过阈值、正在拖动文字。
+    MoveText {
+        press: (f32, f32),
+        at: usize,
+        moving: bool,
+    },
     Splitter {
         start_x: f32,
         start_width: f32,
@@ -809,6 +873,11 @@ enum Drag {
         start: f32,
         size: f32,
     },
+    /// 拖动 Git 面板的上沿：按下时的纵坐标、面板当时的高度（逻辑像素）。
+    GitPanelDivider {
+        start: f32,
+        size: f32,
+    },
     /// 拖动大纲标题行的上沿：按下时的纵坐标、符号列表当时的高度（逻辑像素）。
     OutlineDivider {
         start: f32,
@@ -821,6 +890,14 @@ enum Drag {
     },
     /// 拖动编辑区窗格之间的第 `index` 道分隔线。
     PaneDivider {
+        index: usize,
+    },
+    /// 拖动拆分的终端标签中的第 `index` 条分隔线（见 `App::drag_terminal_split`）。
+    TerminalSplit {
+        index: usize,
+    },
+    /// 拖动终端分栏之间的第 `index` 条分隔线（见 `App::drag_terminal_group_split`）。
+    TerminalGroupSplit {
         index: usize,
     },
     /// 拖动日志标签中列表与详情之间的分隔线：按下时的横坐标、详情栏当时的宽度。
@@ -983,6 +1060,8 @@ pub struct App {
     pub layout: Layout,
     /// 标签栏的标签和滚动状态。
     pub tabs: TabBar,
+    /// 按最近使用切换标签页的列表和记录。
+    pub(crate) tab_switch: workspace::tab_switch::TabSwitch,
     /// 编辑区的各个窗格在界面上的位置和状态。
     pub(crate) panes: workspace::panes::PaneUi,
     /// 差异视图的界面状态。
@@ -1049,6 +1128,8 @@ pub struct App {
 
     /// 保存时格式化和修复的状态。
     pub format: FormatState,
+    /// `.http` 请求文件中正在发送的请求和各文档的请求行。
+    pub(crate) http: editor::http::HttpState,
     /// Git 模块：仓库状态、文件树装饰，以及提交、日志、追溯、分支、合并各视图的状态。
     ///
     /// 模块关闭时为空。
@@ -1176,6 +1257,7 @@ impl App {
         match done {
             UserEvent::GitStatus => self.poll_git(),
             UserEvent::GitContent => self.poll_git_content(),
+            UserEvent::GitCombined => self.poll_combined(),
             UserEvent::GitCommit => self.poll_commit(),
             UserEvent::GitBase => self.poll_bases(),
             UserEvent::GitOperated => self.poll_branch_ops(),
@@ -1184,6 +1266,7 @@ impl App {
             UserEvent::FolderListed => self.poll_folder_levels(),
             UserEvent::WatcherStarted => self.poll_watchers(),
             UserEvent::FormatPlanned => self.poll_formatting(),
+            UserEvent::ToolsPlanned => self.poll_tool_plans(),
             UserEvent::FileWorked => self.poll_file_work(),
             UserEvent::GitMergeSides => self.poll_merge_sides(),
             UserEvent::GitLog => self.poll_log(),
@@ -1199,6 +1282,7 @@ impl App {
             UserEvent::BackedUp => self.collect_backups(false),
             UserEvent::Replaced => self.poll_replace_all(),
             UserEvent::Wrapped => self.poll_wraps(),
+            UserEvent::Compared => self.poll_compares(),
             other => debug_assert!(false, "{other:?} 不是后台任务做完的事件"),
         }
     }
@@ -1206,6 +1290,11 @@ impl App {
     /// 返回本窗口的系统窗口编号；窗口尚未创建时为 `None`。
     pub(crate) fn window_id(&self) -> Option<winit::window::WindowId> {
         self.window.handle.as_ref().map(|w| w.id())
+    }
+
+    /// 返回系统窗口；还没有创建（测试中）时返回 `None`。
+    pub(crate) fn system_window(&self) -> Option<&Arc<winit::window::Window>> {
+        self.window.handle.as_ref()
     }
 
     /// 返回鼠标位置（逻辑像素）。
@@ -1231,8 +1320,8 @@ impl App {
     ///
     /// 目标是带提示的按钮时记录悬停开始的时刻，悬停足够久后才显示提示。
     pub(super) fn set_hover(&mut self, hover: Hover) {
-        // 窗口内的菜单覆盖在上方时，下方的部件均不视为悬停（`hover_at` 同样如此）。
-        let hover = if self.popup().is_some() {
+        // 窗口内的提示框或菜单覆盖在上方时，下方的部件均不视为悬停（`hover_at` 同样如此）。
+        let hover = if self.modal_open() {
             Hover::None
         } else {
             hover
@@ -1256,6 +1345,13 @@ impl App {
             }
             self.preview.markdown.toc_rest = toc(hover).then(Instant::now);
             self.preview.markdown.toc_shown = false;
+            let glow = self.clock(animation::TOC_GLOW);
+            self.preview.markdown.toc_glow = glow.map(|clock| (toc(hover), clock));
+        }
+        if self.move_history_card(self.pointer.hover, hover) {
+            self.pointer.hover = hover;
+            self.request_redraw();
+            return;
         }
         if hover != self.pointer.hover {
             self.leave_tooltip();
@@ -1274,6 +1370,7 @@ impl App {
     fn drop_drags(&mut self) {
         self.cancel_tree_drag();
         self.cancel_tab_drag();
+        self.cancel_terminal_tab_drag();
         self.pointer.drag = Drag::None;
         self.pointer.close_pressed = None;
         self.pointer.control_pressed = None;

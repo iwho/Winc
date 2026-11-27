@@ -1,6 +1,10 @@
 //! 暂存区视图的测试：各项的状态取自暂存区，提交取暂存区的内容。
+//!
+//! 按段、按行暂存的测试打开整体的差异（上次提交 ↔ 工作区，编辑区中「显示当前文件的改动」
+//! 打开的就是它），勾选框显示各段在暂存区中的状态；从两组打开的分开显示的差异见 `split`。
 
 use super::*;
+use crate::app::git::Target;
 
 /// 返回 `root` 中 `HEAD` 里的 `src/main.rs`。
 fn head_main(root: &Path) -> String {
@@ -35,7 +39,9 @@ fn file_state(app: &App, path: &Path) -> Option<bool> {
 fn picks(app: &App) -> Vec<winc_core::diff::Pick> {
     let view = app.editor.active().unwrap().diff.as_deref().unwrap();
     let entry = app.diff_entry(view).unwrap();
-    app.git.commit.hunk_inclusions(entry, view)
+    app.git
+        .commit
+        .hunk_inclusions(entry, view, app.active_diff_kind())
 }
 
 #[test]
@@ -53,7 +59,7 @@ fn only_the_staged_hunks_are_committed() {
     }
     let root = app.git.root.clone().unwrap();
     let file = root.join("src/main.rs");
-    app.git_preview_changes(&file);
+    app.fetch_changes(&file, Target::Open);
     paint(&mut app);
     // 两处改动各有一个勾选框，都没有暂存；勾上第一处（`value_5` 改成 500），文件变成「部分」。
     assert!(
@@ -262,7 +268,7 @@ fn only_the_staged_lines_are_committed() {
     )
     .unwrap();
     app.git_refresh();
-    app.git_preview_changes(&file);
+    app.fetch_changes(&file, Target::Open);
     paint(&mut app);
 
     // 暂存 `added_b` 所在的那处改动，再把 `added_b` 这一行取消暂存；另一处改动不暂存。
@@ -299,7 +305,7 @@ fn only_the_staged_lines_are_committed() {
     assert!(std::fs::read_to_string(&file).unwrap().contains("added_b"));
 
     // 再暂存这一行：这处改动全部暂存。
-    app.git_preview_changes(&file);
+    app.fetch_changes(&file, Target::Open);
     paint(&mut app);
     let view = app.editor.active().unwrap().diff.as_deref().unwrap();
     let text = std::fs::read_to_string(&file).unwrap();
@@ -338,7 +344,7 @@ fn a_file_edited_after_staging_is_partly_staged() {
     assert_eq!(file_state(&app, &file), Some(false));
 
     // 三处改动：`value_5` 暂存后又改过，`value_30` 是新的改动，删掉的 `value_50` 已暂存。
-    app.git_preview_changes(&file);
+    app.fetch_changes(&file, Target::Open);
     paint(&mut app);
     let now = picks(&app);
     assert!(matches!(now[0], Pick::Lines(_)), "{now:?}");
@@ -382,7 +388,7 @@ fn identical_changes_are_staged_one_by_one() {
         );
     std::fs::write(&file, &disk).unwrap();
     app.git_refresh();
-    app.git_preview_changes(&file);
+    app.fetch_changes(&file, Target::Open);
     paint(&mut app);
     let view = app.editor.active().unwrap().diff.as_deref().unwrap();
     let same: Vec<usize> = (0..view.hunks.len())
@@ -412,6 +418,9 @@ fn identical_changes_are_staged_one_by_one() {
 }
 
 /// 文件树和标签的右键菜单对有更改的文件提供暂存、取消暂存与回滚；没有更改的文件没有这几项。
+/// 暂存区视图中回滚只放弃未暂存的更改，与提交视图相同；勾选式下回滚到上次提交。
+///
+/// 回归：暂存区视图中从文件树、标签回滚，已暂存的更改也被放弃。
 #[test]
 fn the_tree_and_tab_menus_stage_and_roll_back_a_changed_file() {
     use crate::app::input::context_menu::MenuCommand::{CommitCheck, FileHistory, GitRollbackFile};
@@ -422,11 +431,20 @@ fn the_tree_and_tab_menus_stage_and_roll_back_a_changed_file() {
     app.git.commit.set_staging(true);
     let file = root.join("Cargo.toml");
     let before = std::fs::read_to_string(&file).unwrap();
-    std::fs::write(&file, format!("{before}# changed\n")).unwrap();
+    let staged = format!("{before}# staged\n");
+    std::fs::write(&file, &staged).unwrap();
     app.git_refresh();
     let commands = |app: &mut App, target: MenuTarget| -> Vec<_> {
         app.open_context_menu(target, (0.0, 0.0));
         menu_commands(app).into_iter().map(|(c, _)| c).collect()
+    };
+    let index = |root: &Path| {
+        let out = std::process::Command::new("git")
+            .args(["show", ":Cargo.toml"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8(out.stdout).unwrap()
     };
 
     let listed = commands(&mut app, MenuTarget::Tree(Some(file.clone())));
@@ -437,21 +455,40 @@ fn the_tree_and_tab_menus_stage_and_roll_back_a_changed_file() {
     app.run_menu_command(CommitCheck(true));
     assert_eq!(file_state(&app, &file), Some(true));
 
-    // 已全部暂存的文件只有「取消暂存」；标签的菜单相同。
+    // 已全部暂存的文件只有「取消暂存」，没有可回滚的未暂存更改；标签的菜单相同。
     app.open_path(&file);
     let id = app.editor.active().unwrap().id;
     let listed = commands(&mut app, MenuTarget::Tab(id));
     assert!(
-        listed.ends_with(&[FileHistory, CommitCheck(false), GitRollbackFile]),
+        listed.ends_with(&[FileHistory, CommitCheck(false)]),
         "{listed:?}"
     );
-    app.run_menu_command(CommitCheck(false));
-    assert_eq!(file_state(&app, &file), None);
 
-    // 回滚恢复为上次提交的内容，之后该文件没有更改，菜单里也没有这几项。
+    // 暂存后又修改：回滚只放弃未暂存的更改，工作区恢复为暂存区的内容，暂存区不变。
+    std::fs::write(&file, format!("{staged}# unstaged\n")).unwrap();
+    app.git_refresh();
+    let listed = commands(&mut app, MenuTarget::Tab(id));
+    assert!(
+        listed.ends_with(&[
+            FileHistory,
+            CommitCheck(true),
+            CommitCheck(false),
+            GitRollbackFile
+        ]),
+        "{listed:?}"
+    );
+    app.run_menu_command(GitRollbackFile);
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), staged);
+    assert_eq!(index(&root), staged);
+
+    // 勾选式下回滚到上次提交，暂存区一起恢复；之后该文件没有更改，菜单里也没有这几项。
+    app.git.commit.set_staging(false);
+    std::fs::write(&file, format!("{staged}# unstaged\n")).unwrap();
+    app.git_refresh();
     let _ = commands(&mut app, MenuTarget::Tree(Some(file.clone())));
     app.run_menu_command(GitRollbackFile);
     assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
+    assert_eq!(index(&root), before);
     let listed = commands(&mut app, MenuTarget::Tree(Some(file)));
     assert!(listed.ends_with(&[FileHistory]), "{listed:?}");
     let _ = std::fs::remove_dir_all(&root);
@@ -730,3 +767,5 @@ fn rolling_back_changes_keeps_what_is_staged() {
     assert!(status.entries.iter().all(|e| e.unstaged.is_none()));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+mod split;

@@ -1318,11 +1318,12 @@ impl App {
     }
 
     pub(super) fn layout_agent(&mut self) {
+        let git_full = self.git.panel.full && self.git_panel_shown();
         let Some(panel) = self.agent.as_mut().filter(|panel| panel.shown) else {
             return;
         };
         panel.rects = PanelRects::default();
-        if !self.config.agent_enabled.unwrap_or(true) {
+        if git_full || !self.config.agent_enabled.unwrap_or(true) {
             return;
         }
         let layout = &mut self.layout;

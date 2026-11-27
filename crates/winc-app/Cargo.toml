@@ -109,6 +109,7 @@ roxmltree.workspace = true
 
 [dev-dependencies]
 winc-backend = { workspace = true, features = ["test-support"] }
+winc-search.workspace = true
 
 [lints]
 workspace = true

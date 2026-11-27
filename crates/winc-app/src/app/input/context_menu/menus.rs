@@ -181,12 +181,11 @@ pub fn tree_menu(kind: Option<EntryKind>, can_paste: bool, remote: bool) -> Vec<
     menu.push(Separator);
     menu.push(Item(CopyPath, true));
     if kind.is_some() {
-        menu.extend([
-            Item(CopyRelativePath, true),
-            Separator,
-            Item(Rename, true),
-            Item(Delete, true),
-        ]);
+        menu.push(Item(CopyRelativePath, true));
+        if kind == Some(EntryKind::File) {
+            menu.push(Item(CopyAsPrompt, true));
+        }
+        menu.extend([Separator, Item(Rename, true), Item(Delete, true)]);
     }
     menu
 }
@@ -213,9 +212,11 @@ pub fn tree_selection_menu(files: usize, remote: bool) -> Vec<MenuEntry> {
         Separator,
         Item(CopyPath, true),
         Item(CopyRelativePath, true),
-        Separator,
-        Item(Delete, true),
     ]);
+    if files > 0 {
+        menu.push(Item(CopyAsPrompt, true));
+    }
+    menu.extend([Separator, Item(Delete, true)]);
     menu
 }
 
@@ -274,10 +275,13 @@ pub struct CommitActions {
     pub parent: bool,
     /// 提交视图里有可以提交的更改：可以修正、压缩到这个提交。
     pub changes: bool,
+    /// 菜单在日志中弹出；否则在提交历史中弹出，没有比较、转到等依赖日志的项，
+    /// 改为第一项「在日志中显示」。
+    pub in_log: bool,
 }
 
-/// 日志里一个提交的右键菜单，分组和顺序：复制与拣选；签出与比较；重置、还原与撤销；改写历史与推送；
-/// 指向这个提交的各分支、标签的子菜单，新建分支、标签；转到。
+/// 日志或提交历史里一个提交的右键菜单（见 [`CommitActions::in_log`]），分组和顺序：复制与拣选；
+/// 签出与比较；重置、还原与撤销；改写历史与推送；各分支、标签的子菜单，新建分支、标签；转到。
 ///
 /// `actions` 说明哪些操作可用，`branch` 是当前分支名（分离的 `HEAD` 时为「HEAD」），写进重置子菜单
 /// 的标题；`branches` 是指向这个提交的分支及其操作（见 [`crate::app::git::branch::branch_ops`]）。
@@ -298,7 +302,11 @@ pub fn log_commit_menu(
         actions.on_head != Some(false),
         actions.on_head != Some(true),
     );
-    let mut menu = vec![
+    let mut menu = Vec::new();
+    if !actions.in_log {
+        menu.extend([Item(LogShowInLog, true), Separator]);
+    }
+    menu.extend([
         Item(LogCopyOid, true),
         Item(LogCopyShortOid, true),
         Item(LogCopyMessage, true),
@@ -307,7 +315,11 @@ pub fn log_commit_menu(
         Separator,
         Item(LogCheckout, enabled),
         Item(LogNewWorktree, enabled),
-        Item(LogCompareRevision, true),
+    ]);
+    if actions.in_log {
+        menu.push(Item(LogCompareRevision, true));
+    }
+    menu.extend([
         Separator,
         Submenu(
             t!("menu-log-reset-branch", branch = branch),
@@ -328,14 +340,14 @@ pub fn log_commit_menu(
         Item(LogInteractiveRebase, enabled && history),
         Item(LogPushUpTo, enabled && history && actions.push),
         Separator,
-    ];
+    ]);
     // 提交上的分支、标签：每个一个子菜单，多了收进一个子菜单。
     let branch_title = |name: &str| t!("menu-log-branch", name = name);
     let group = t!("menu-log-branches");
     menu.extend(ref_submenus(branches, BRANCH_SUBMENUS, branch_title, group));
     let tags = (tags.iter().enumerate())
         .map(|(i, name)| {
-            let ops = TagOp::ALL.map(|op| Item(LogTag(op, i), enabled));
+            let ops = TagOp::ALL.map(|op| Item(LogTag(op, i), enabled || !op.changes_repository()));
             ((*name).to_owned(), ops.into())
         })
         .collect();
@@ -346,14 +358,15 @@ pub fn log_commit_menu(
         tag_title,
         t!("menu-log-tags"),
     ));
-    menu.extend([
-        Item(LogNewBranch, enabled),
-        Item(LogNewTag, enabled),
-        Separator,
-        Item(LogGoTo, true),
-        Item(LogGoToChild, actions.child),
-        Item(LogGoToParent, actions.parent),
-    ]);
+    menu.extend([Item(LogNewBranch, enabled), Item(LogNewTag, enabled)]);
+    if actions.in_log {
+        menu.extend([
+            Separator,
+            Item(LogGoTo, true),
+            Item(LogGoToChild, actions.child),
+            Item(LogGoToParent, actions.parent),
+        ]);
+    }
     menu
 }
 
@@ -480,15 +493,20 @@ pub fn commit_selection_menu(any_exists: bool) -> Vec<MenuEntry> {
     ]
 }
 
-/// 返回全局搜索结果里一行的菜单项：打开；文件行是复制路径、复制相对路径、在文件树中显示，
-/// 匹配行是复制这一行的文字；最后是替换（`replace`：替换输入展开着）和从结果中移除。
+/// 返回全局搜索结果里一行的菜单项：打开（目录行没有）；目录、文件行是复制路径、复制相对路径、
+/// 在文件树中显示，匹配行是复制这一行的文字；最后是替换（`replace`：替换输入展开着）和从结果中
+/// 移除。
 ///
-/// `file` 表示右键点着的是文件行。结果都来自打开的目录，因此相对路径、在文件树中显示总是可用。
-pub fn search_result_menu(file: bool, replace: bool) -> Vec<MenuEntry> {
+/// `file` 表示右键点着的是目录或文件行，`dir` 表示是目录行（以树形显示时）。结果都来自打开的
+/// 目录，因此相对路径、在文件树中显示总是可用。
+pub fn search_result_menu(file: bool, dir: bool, replace: bool) -> Vec<MenuEntry> {
     use MenuCommand::*;
     use MenuEntry::{Item, Separator};
 
-    let mut menu = vec![Item(OpenFiles, true), Separator];
+    let mut menu = Vec::new();
+    if !dir {
+        menu.extend([Item(OpenFiles, true), Separator]);
+    }
     if file {
         menu.extend([
             Item(CopyPath, true),
@@ -522,13 +540,18 @@ pub fn hex_menu(selected: bool) -> Vec<MenuEntry> {
     ]
 }
 
-/// 返回编辑区菜单的菜单项：转到定义、查找引用，添加/删除书签、列出书签，格式化（有选区时多一项
-/// 「格式化选中部分」）、修复问题，最后是剪切、复制、粘贴、复制引用。
+/// 返回编辑区菜单的菜单项：转到定义与引用、书签、格式化与修复、「比较」子菜单、剪切复制粘贴。
 ///
-/// `bookmarked` 决定「添加书签」「删除书签」哪个可用。没有选区时剪切、复制作用于光标所在的整行；
-/// 只读的文件不能格式化、剪切、粘贴。格式化和修复总是可以点击，无法执行时点击后说明原因。「粘贴」
-/// 不检查剪贴板里有没有文字：弹出菜单不应读取其他应用复制的内容。
-pub fn editor_menu(editable: bool, selected: bool, bookmarked: bool) -> Vec<MenuEntry> {
+/// `bookmarked` 决定添加、删除书签哪个可用；只读时不能格式化、剪切、粘贴，`saved` 为假时不能与
+/// 已保存的版本比较。格式化和修复无法执行时点击后说明原因；没有选区时剪切、复制作用于整行。
+/// 「粘贴」「与剪贴板比较」不检查剪贴板：弹出菜单不应读取其他应用复制的内容。
+pub fn editor_menu(
+    editable: bool,
+    selected: bool,
+    bookmarked: bool,
+    markdown: bool,
+    saved: bool,
+) -> Vec<MenuEntry> {
     use MenuCommand::*;
     use MenuEntry::{Item, Separator};
 
@@ -546,20 +569,37 @@ pub fn editor_menu(editable: bool, selected: bool, bookmarked: bool) -> Vec<Menu
         menu.push(Item(FormatSelection, editable));
     }
     menu.push(Item(Fix, editable));
+    // 有选区时比较选中部分，菜单项的文字随之改变。
+    let clipboard = match selected {
+        true => CompareSelectionWithClipboard,
+        false => CompareWithClipboard,
+    };
+    let compare = vec![Item(clipboard, true), Item(CompareWithSaved, saved)];
     menu.extend([
+        Separator,
+        MenuEntry::Submenu(t!("menu-compare").to_owned(), compare),
         Separator,
         Item(Cut, editable),
         Item(Copy, true),
         Item(Paste, editable),
-        Item(CopyReference, true),
     ]);
+    if markdown {
+        menu.push(Item(PastePlain, editable));
+    }
+    menu.push(Item(CopyReference, true));
     menu
 }
 
 /// 返回终端里的菜单项：右键点在命令块上时（`block`：报了命令行，能不能重新运行）先是复制命令、
 /// 复制输出、重新运行；然后复制（有选区时）、粘贴（程序还在运行时）、全选，查找、清屏，最大化
-/// 面板，新建、关闭终端。
-pub fn terminal_menu(selected: bool, running: bool, block: Option<(bool, bool)>) -> Vec<MenuEntry> {
+/// 面板，新建、拆分、移到新分栏（`group`：面板是否在右侧，即移到下方；这一栏是否不止一个
+/// 标签）、关闭终端。
+pub fn terminal_menu(
+    selected: bool,
+    running: bool,
+    block: Option<(bool, bool)>,
+    group: (bool, bool),
+) -> Vec<MenuEntry> {
     use MenuCommand::*;
     use MenuEntry::{Item, Separator};
 
@@ -585,6 +625,8 @@ pub fn terminal_menu(selected: bool, running: bool, block: Option<(bool, bool)>)
         Separator,
         Item(NewTerminal, true),
         Item(SplitTerminal, running),
+        Item(move_group_command(group.0), group.1),
+        Item(MoveTerminalToEditor, true),
         Item(CloseTerminal, true),
     ]);
     menu
@@ -965,5 +1007,13 @@ pub fn indent_size_title(indent: Indent) -> &'static str {
     match indent {
         Indent::Spaces(_) => t!("menu-indent-size"),
         Indent::Tabs => t!("menu-tab-size"),
+    }
+}
+
+/// 移到新分栏的菜单项：面板在右侧（`right`）时各栏上下排，移到下方，否则移到右侧。
+pub fn move_group_command(right: bool) -> MenuCommand {
+    match right {
+        true => MenuCommand::MoveTerminalDown,
+        false => MenuCommand::MoveTerminalRight,
     }
 }
