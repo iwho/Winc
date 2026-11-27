@@ -2133,7 +2133,9 @@ mod tests {
             panel.current().unwrap().timing,
             Some(TurnTiming::Finished(elapsed)) if elapsed >= Duration::from_secs(7)
         ));
-        assert_eq!(app.agent_timer_tick(Instant::now()), None);
+        let quota_refresh = app.agent.as_ref().unwrap().rate_limits_refresh;
+        assert_eq!(app.agent_timer_tick(Instant::now()), quota_refresh);
+        assert!(app.agent.as_ref().unwrap().timer_wake.is_none());
     }
 
     #[test]
