@@ -135,7 +135,7 @@ fn standalone_agent_shows_a_composer_without_file_actions() {
 }
 
 #[test]
-fn agent_header_reflows_navigation_and_keeps_caption_controls_clear() {
+fn agent_header_groups_session_actions_before_panel_controls() {
     use crate::app::agent::{Connection, Hit, Tab};
 
     let mut app = blank_app(false);
@@ -143,30 +143,41 @@ fn agent_header_reflows_navigation_and_keeps_caption_controls_clear() {
     app.toggle_agent();
     app.agent.as_mut().unwrap().connection = Connection::Ready;
 
-    for (width, inline) in [(750.0, true), (240.0, false)] {
+    for width in [750.0, 240.0] {
         app.agent.as_mut().unwrap().width = width;
         paint(&mut app);
         let panel = app.agent.as_ref().unwrap();
-        let history = panel
-            .hits
-            .iter()
-            .find_map(|(rect, hit)| matches!(hit, Hit::Show(Tab::History)).then_some(*rect))
-            .unwrap();
-        let new = panel
-            .hits
-            .iter()
-            .find_map(|(rect, hit)| matches!(hit, Hit::New).then_some(*rect))
-            .unwrap();
-        assert_eq!(new.y, app.layout.sidebar_button.y);
-        assert!(new.right() <= app.layout.controls.x);
         let caption_controls = app.caption_controls();
-        assert!(caption_controls.contains(&new));
-        assert_eq!(caption_controls.contains(&history), inline);
-        if inline {
-            assert!(new.right() < history.x);
-            assert!(history.bottom() <= TOP_BAR_END);
-        } else {
-            assert!(history.y >= TOP_BAR_END);
+        let actions: Vec<_> = panel
+            .hits
+            .iter()
+            .filter(|(_, hit)| {
+                matches!(
+                    hit,
+                    Hit::New | Hit::Show(Tab::History) | Hit::Maximize | Hit::Split | Hit::Close
+                )
+            })
+            .collect();
+        assert!(matches!(
+            actions.as_slice(),
+            [
+                (_, Hit::New),
+                (_, Hit::Show(Tab::History)),
+                (_, Hit::Maximize),
+                (_, Hit::Split),
+                (_, Hit::Close)
+            ]
+        ));
+        for (rect, _) in &actions {
+            assert_eq!(rect.y, app.layout.sidebar_button.y);
+            assert!(rect.right() <= app.layout.controls.x);
+            assert!(caption_controls.contains(rect));
         }
+        let gaps: Vec<_> = actions
+            .windows(2)
+            .map(|pair| pair[1].0.x - pair[0].0.right())
+            .collect();
+        assert!(gaps.iter().all(|&gap| gap > 0.0));
+        assert!(gaps[1] > gaps[0]);
     }
 }

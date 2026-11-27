@@ -91,14 +91,68 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     };
     let header = Rect::new(start, caption.y, (end - start).max(0.0), caption.h);
     let button_y = header.y + (header.h - BUTTON) / 2.0;
-    let close = Rect::new(end - BUTTON, button_y, BUTTON, BUTTON).intersect(header);
-    let split = Rect::new(close.x - BUTTON - TAB_GAP, button_y, BUTTON, BUTTON).intersect(header);
-    let maximize =
-        Rect::new(split.x - BUTTON - TAB_GAP, button_y, BUTTON, BUTTON).intersect(header);
+    let separator_width = 1.0;
+    let title_space = 32.0;
+    let gap = if header.w >= title_space + 5.0 * BUTTON + 6.0 * TAB_GAP + separator_width {
+        TAB_GAP
+    } else {
+        BUTTON_GAP
+    };
+    let header_button_width = ((header.w - title_space - 6.0 * gap - separator_width) / 5.0)
+        .floor()
+        .clamp(18.0, BUTTON);
+    let step = header_button_width + gap;
+    let button = |right| {
+        Rect::new(
+            right - header_button_width,
+            button_y,
+            header_button_width,
+            BUTTON,
+        )
+    };
+    let close = button(header.right());
+    let split = button(header.right() - step);
+    let maximize = button(header.right() - 2.0 * step);
+    let separator = Rect::new(
+        maximize.x - gap - separator_width,
+        button_y + 7.0,
+        separator_width,
+        BUTTON - 14.0,
+    );
+    let history = button(separator.x - gap);
+    let new = button(history.x - gap);
+    let title = Rect::new(
+        header.x,
+        button_y,
+        (new.x - gap - header.x).max(0.0),
+        BUTTON,
+    );
     let project_matches = app.agent_matches_workspace(panel);
-    let icon = Rect::new(header.x, button_y, BUTTON_SMALL, BUTTON).intersect(header);
-    frame.rect_clipped(icon.inset(0.0, 2.0), p.selected, RADIUS_ROW, header);
-    icons::codex(frame, center(icon), p.accent, icon);
+    let title = if title.w >= BUTTON_SMALL + TAB_GAP + title_space {
+        let icon = Rect::new(title.x, button_y, BUTTON_SMALL, BUTTON);
+        frame.rect_clipped(icon.inset(0.0, 2.0), p.selected, RADIUS_ROW, header);
+        icons::codex(frame, center(icon), p.accent, icon);
+        let x = icon.right() + TAB_GAP;
+        Rect::new(x, title.y, title.right() - x, title.h)
+    } else {
+        title
+    };
+    if title.w > 0.0 {
+        let label = panel.session_title().unwrap_or(t!("agent-title"));
+        let label = ellipsize(frame, label, app.fonts.ui, title.w);
+        ui_text(frame, app, title.x, title, &label, p.text, title);
+    }
+    draw_session_actions(
+        app,
+        frame,
+        panel,
+        new.intersect(header),
+        history.intersect(header),
+    );
+    frame.rect(separator.intersect(header), p.border);
+    let maximize = maximize.intersect(header);
+    let split = split.intersect(header);
+    let close = close.intersect(header);
     draw_button(frame, p, maximize, area, maximize.contains(x, y), false);
     if panel.maximized {
         icons::shrink(frame, center(maximize), p.text_muted, maximize);
@@ -125,8 +179,8 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
         panel.hits.push((close, Hit::Close));
     }
 
-    let mut top = header.bottom() + SIDEBAR_LIST_GAP;
-    top = draw_session_overview(app, frame, panel, Rect::new(body.x, top, body.w, ROW));
+    let top = header.bottom() + SIDEBAR_LIST_GAP;
+    let mut top = draw_session_usage(app, frame, panel, body, top);
     if panel.workspace_parallel {
         let warning = t!("agent-parallel");
         let lines = wrap_text(warning, body.w, |text| {
@@ -717,26 +771,14 @@ fn draw_session_controls(
         panel.hits.push((rect, Hit::Show(Tab::Models)));
     }
 }
-fn draw_session_overview(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, row: Rect) -> f32 {
-    let row = Rect::new(row.x, row.y + 2.0, row.w, row.h);
+fn draw_session_actions(
+    app: &App,
+    frame: &mut Frame<'_>,
+    panel: &mut Panel,
+    new: Rect,
+    history: Rect,
+) {
     let p = app.palette;
-    let title = panel.session_title().unwrap_or(t!("agent-title"));
-    let title_area = Rect::new(
-        row.x,
-        row.y,
-        (row.w - 2.0 * BUTTON_SMALL - 2.0 * BUTTON_GAP).max(0.0),
-        row.h,
-    );
-    let title = ellipsize(frame, title, app.fonts.ui, title_area.w);
-    ui_text(
-        frame,
-        app,
-        title_area.x,
-        title_area,
-        &title,
-        p.text,
-        title_area,
-    );
     let project_matches = app.agent_matches_workspace(panel);
     let action = if !project_matches && panel.root.is_some() {
         Hit::SwitchProject
@@ -748,25 +790,22 @@ fn draw_session_overview(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, ro
     let enabled = panel.connection == Connection::Ready
         || (panel.connection != Connection::Connecting && !panel.any_active());
     let (x, y) = app.mouse();
-    for (index, hit, active) in [
-        (0, action, enabled),
+    for (button, hit, active) in [
+        (new, action, enabled),
         (
-            1,
+            history,
             Hit::Show(Tab::History),
             panel.connection == Connection::Ready,
         ),
     ] {
-        let button = Rect::new(
-            title_area.right() + BUTTON_GAP + index as f32 * (BUTTON_SMALL + BUTTON_GAP),
-            row.y,
-            BUTTON_SMALL,
-            row.h,
-        );
+        if button.w <= 0.0 || button.h <= 0.0 {
+            continue;
+        }
         draw_button(
             frame,
             p,
             button,
-            row,
+            button,
             active && button.contains(x, y),
             false,
         );
@@ -780,10 +819,20 @@ fn draw_session_overview(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, ro
             panel.hits.push((button, hit));
         }
     }
+}
+
+fn draw_session_usage(
+    app: &App,
+    frame: &mut Frame<'_>,
+    panel: &Panel,
+    body: Rect,
+    top: f32,
+) -> f32 {
     let Some((label, fraction)) = panel.token_summary() else {
-        return row.bottom() + 2.0 + SIDEBAR_GAP;
+        return top + SIDEBAR_GAP;
     };
-    let track = Rect::new(row.x, row.bottom() + 4.0, row.w, 2.0);
+    let p = app.palette;
+    let track = Rect::new(body.x, top + 4.0, body.w, 2.0);
     frame.rect_clipped(track, p.switch_off, 1.0, track);
     if let Some(fraction) = fraction {
         frame.rect_clipped(
@@ -795,9 +844,9 @@ fn draw_session_overview(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, ro
     }
     let detail_line_height = (app.fonts.ui_small * 1.6).ceil().max(24.0);
     let detail = Rect::new(
-        row.x,
+        body.x,
         track.bottom() + SIDEBAR_LIST_GAP,
-        row.w,
+        body.w,
         detail_line_height,
     );
     let now = std::time::SystemTime::now()
