@@ -264,7 +264,7 @@ fn draw_panel(app: &mut App, frame: &mut Frame<'_>, panel: &mut Panel) {
     let model_text = format!("{model} {effort}");
     let model_w = (frame.measure(FontKind::Ui, app.fonts.ui_small, &model_text)
         + frame.measure(FontKind::Ui, app.fonts.ui_small, " ")
-        + 17.0)
+        + 18.0)
         .min((permission_end - footer.x).max(0.0) * 0.55);
     let permission_space = (permission_end - footer.x - BUTTON_GAP - model_w - BUTTON_GAP).max(0.0);
     let (permission_w, attach_w) = if show_attach {
@@ -743,12 +743,12 @@ fn draw_session_controls(
     let text = Rect::new(
         rect.x + 4.0,
         rect.y,
-        (rect.w - 17.0 - space).max(0.0),
+        (rect.w - 18.0 - space).max(0.0),
         rect.h,
     );
     let label = ellipsize(frame, label, app.fonts.ui_small, text.w);
     let arrow_x = text.x + frame.measure(FontKind::Ui, app.fonts.ui_small, &label) + space + 6.0;
-    let rect = Rect::new(rect.x, rect.y, (arrow_x + 7.0 - rect.x).min(rect.w), rect.h);
+    let rect = Rect::new(rect.x, rect.y, (arrow_x + 8.0 - rect.x).min(rect.w), rect.h);
     draw_button(frame, p, rect, rect, enabled && rect.contains(x, y), false);
     ui_text_small(
         frame,
@@ -1455,11 +1455,8 @@ fn draw_chat(app: &App, frame: &mut Frame<'_>, panel: &mut Panel, area: Rect) {
                     if hit.h > 0.0 {
                         actions.hits.push((hit, Hit::CopyMessage(ordinal)));
                     }
-                    {
-                        let label = card.message_time.map_or_else(
-                            || "--:--".to_owned(),
-                            |(hour, minute)| format!("{hour:02}:{minute:02}"),
-                        );
+                    if let Some((hour, minute)) = card.message_time {
+                        let label = format!("{hour:02}:{minute:02}");
                         let width = actions
                             .frame
                             .measure(FontKind::Ui, app.fonts.ui_small, &label);
@@ -1862,7 +1859,7 @@ fn card_header_height(kind: ItemKind) -> f32 {
 
 fn content_top(kind: ItemKind) -> f32 {
     if kind == ItemKind::User {
-        USER_MESSAGE_PAD_Y - 3.0
+        USER_MESSAGE_PAD_Y
     } else {
         CONTENT_TOP
     }

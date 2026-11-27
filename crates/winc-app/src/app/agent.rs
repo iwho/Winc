@@ -1830,6 +1830,12 @@ impl App {
     }
 
     fn toggle_agent_split(&mut self) {
+        if self.agent_split {
+            if let Some(panel) = &mut self.agent {
+                panel.width = ((panel.rects.body.w - 1.0) * 0.5).max(0.0).round();
+                panel.maximized = false;
+            }
+        }
         if self.agent_peer.is_none() {
             let mut peer = Box::new(Panel::new());
             if let Some(active) = &self.agent {
@@ -1901,6 +1907,43 @@ mod tests {
         assert!(!app.agent_focus_right);
         assert_eq!(app.agent.as_ref().unwrap().field.text(), "left draft");
         assert_eq!(app.agent_peer.as_ref().unwrap().field.text(), "right draft");
+    }
+
+    #[test]
+    fn merging_split_preserves_focused_pane_width_and_exits_maximized() {
+        for maximized in [false, true] {
+            for focus_right in [false, true] {
+                let (mut app, _) = test_panel(0);
+                app.agent.as_mut().unwrap().field.set_text("left draft");
+                app.agent.as_mut().unwrap().maximized = maximized;
+                let mut peer = Box::new(Panel::new());
+                peer.field.set_text("right draft");
+                app.agent_peer = Some(peer);
+                app.agent_split = true;
+                app.relayout();
+                paint(&mut app);
+                let body = app.agent_rects().body;
+                let pane_width = ((body.w - 1.0) * 0.5).round();
+                if focus_right {
+                    app.focus_agent_pane_at(body.right() - 10.0, body.y + 50.0);
+                }
+                app.toggle_agent_split();
+                assert!(!app.agent_split);
+                let panel = app.agent.as_ref().unwrap();
+                assert!(!panel.maximized);
+                assert_eq!(panel.rects.body.w, pane_width);
+                assert_eq!(panel.width, pane_width);
+                assert_eq!(
+                    panel.field.text(),
+                    if focus_right {
+                        "right draft"
+                    } else {
+                        "left draft"
+                    }
+                );
+                assert!(app.agent_peer.is_some());
+            }
+        }
     }
 
     #[test]
