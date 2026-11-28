@@ -1,6 +1,25 @@
-# Winc 原生 Codex 侧边栏
+# Winc Agent 侧边栏
 
 点击 Winc 底部状态栏的 Codex 图标打开或收起侧边栏，也可以从命令面板运行「显示或隐藏 Codex Agent」。空窗口可直接发消息，Winc 会在用户配置目录下用独立的 `codex-chat` 目录启动 Codex App Server。打开本地项目时，Codex 可以连接该项目；编辑器文件或选区只有在主动附加时才加入消息。Codex 执行命令和文件操作，Winc 负责会话界面、权限交互和编辑器导航。
+
+## 选择后端
+
+打开 Agent 侧边栏，点击顶部带下拉箭头的后端名称，选择 Codex、Claude、Gemini 或 Antigravity。默认使用 Codex。每个分屏面板单独选择，切回时保留会话、草稿和队列。有正在运行的回合或待审批请求时，请先结束当前任务再切换。
+
+| 后端 | Winc 启动的命令 | 本机准备 |
+| --- | --- | --- |
+| Codex | `codex app-server` | 安装 Codex CLI 并登录。可用 `agent.executable` 指定路径。 |
+| Claude | `claude-agent-acp` | 安装 `npm install -g @agentclientprotocol/claude-agent-acp`，在本机配置 Claude 登录或凭据，确保命令在 PATH 中。 |
+| Gemini | `gemini --acp` | 安装 Gemini CLI，在终端完成登录，确保命令在 PATH 中。 |
+| Antigravity | `agy acp` | 安装 Antigravity CLI，确认 `agy acp --help` 可用，运行 `agy acp --login` 登录，将 agy 加入 PATH。 |
+
+### 多 Agent 通信实现
+
+- 面板持有 `Box<dyn AgentProvider>`，通过 `submit(Command)` 和 `drain()` 收发内部事件。`Backend::connect` 根据选择启动对应子进程，各后端共用现有的 stdio 监督、限长、背压和进程清理。Codex 继续使用原生 App Server 协议。
+- `src/acp.rs` 使用官方 Rust ACP v1 schema 构建握手、建会话、提示和取消消息。ACP 的 `session/prompt` 在客户端生成回合 ID，并把正文、工具、计划和上下文用量映射到统一事件。整轮结束由原请求的 `stopReason` 确认。思考提示沿用面板的等待状态，不保存思考文字。
+- ACP 审批把「允许一次」和「拒绝一次」映射回后端原始选项 ID。取消回合会同时结束待处理审批。图片附件取决于握手中声明的能力。
+- 当前侧边栏隐藏时保留 ACP 连接。支持 `session/list`、`session/load` 或 `session/resume` 的 ACP 后端（如 Antigravity）可按当前项目列出和恢复跨进程历史会话。ACP 回合中指导和永久授权尚未接入。
+- 回归验证使用 `cargo test --locked -p winc-agent` 和 `cargo test --locked -p winc-app --lib app::agent::`。ACP 单测覆盖流式回合、工具局部更新、审批和取消，面板测试覆盖选择器、运行中禁止切换和草稿隔离。
 
 ## macOS 构建与使用
 
@@ -24,7 +43,7 @@
 
 「历史」列出当前项目的会话并支持翻页。恢复后显示最近 16 轮，滚动到会话顶部可继续加载。模型与推理强度来自 Codex 的发现接口。默认采用服务器标记的默认模型，已有会话在所用模型仍可用时可沿用该模型。同一 Winc 进程中，同一根目录的多个会话正在运行时会显示写入冲突提醒。
 
-空闲时隐藏面板会释放连接。已有任务或待审批请求时，隐藏会保留连接；重新打开可停止任务或处理审批。隐藏期间收到新的审批，Winc 会提示。关闭窗口或退出 Winc 会结束关联进程。通信中断后可重新连接并恢复会话，提交结果未知的请求保留草稿，重连不会重新发送。
+Codex 空闲时隐藏面板会释放连接。已有任务或待审批请求时，隐藏会保留连接；重新打开可停止任务或处理审批。隐藏期间收到新的审批，Winc 会提示。关闭窗口或退出 Winc 会结束关联进程。通信中断后可重新连接并恢复会话，提交结果未知的请求保留草稿，重连不会重新发送。
 
 ## 架构与模块
 
@@ -34,6 +53,7 @@
 | crates/winc-agent/src/lib.rs | 与 UI 无关的 AgentProvider、命令、会话、审批与事件类型 |
 | crates/winc-agent/src/codex.rs | App Server 启动、握手、收发、ID 与超时、进程监督 |
 | crates/winc-agent/src/codex/shutdown.rs | Unix 进程组和 Windows Job Object 清理 |
+| crates/winc-agent/src/acp.rs | ACP v1 连接、回合、审批和事件映射 |
 | crates/winc-agent/src/protocol.rs | Codex v2 方法和事件映射、工作区检查、流式合并、审批响应 |
 | crates/winc-agent/tests/app_server.rs、mock-app-server.sh | stdio 集成测试和需本机登录的真实 Codex 测试 |
 | crates/winc-app/src/app/agent.rs | 窗口级生命周期、会话状态、草稿、事件处理 |
@@ -177,3 +197,5 @@ Codex 使用 fileChange 项报告的已完成文件修改会在侧边栏标记�
     WINC_SNAPSHOT_DIR=/tmp/winc-sidebar-shots cargo +stable test --locked -p winc-app agent_rich_snapshot_and_selection -- --nocapture
 
 代码改动约 +2.4k / −0.5k 行，包含回放、快照断言、本地化和 Release 基准。Cargo 生产依赖增加 0 项，三个参考仓库的代码移植 0 行。
+
+Antigravity 使用原生 ACP v1 入口，共用流式回合、工具、审批和取消映射。[官方接入说明](https://antigravity.google/docs/cli/acp)。

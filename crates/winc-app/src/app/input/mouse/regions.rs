@@ -370,8 +370,16 @@ impl App {
     pub(in crate::app) fn field_at(&self, x: f32, y: f32) -> Option<Focus> {
         if self
             .agent
-            .as_ref()
-            .is_some_and(|panel| panel.shown && panel.field.view.area.contains(x, y))
+            .iter()
+            .chain(self.agent_peer.iter().filter(|_| self.agent_split))
+            .filter(|panel| panel.shown && panel.rects.body.w > 0.0)
+            .any(|panel| {
+                panel.field.view.area.contains(x, y)
+                    || (panel.tab == crate::app::agent::Tab::Chat
+                        && panel
+                            .elicitation()
+                            .is_some_and(|e| e.texts.iter().any(|f| f.view.area.contains(x, y))))
+            })
         {
             return Some(Focus::Agent);
         }

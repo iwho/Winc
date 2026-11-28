@@ -60,11 +60,31 @@ pub enum PermissionMode {
     FullAccess,
 }
 
+/// Per-agent saved defaults restored for new sessions.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AgentPreferences {
+    /// Last selected execution/permission mode ID (for ACP agents).
+    pub mode: Option<String>,
+    /// Last selected model ID.
+    pub model: Option<String>,
+    /// Last selected reasoning effort / thinking level.
+    pub effort: Option<String>,
+}
+
+impl AgentPreferences {
+    /// Returns whether no preference has been stored.
+    pub fn is_empty(&self) -> bool {
+        self.mode.is_none() && self.model.is_none() && self.effort.is_none()
+    }
+}
+
 /// 由程序维护的运行状态：最近目录、各目录的现场和项目工具选择。
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct State {
     /// 用户上次选择的 Codex 权限模式。
     pub agent_permissions: PermissionMode,
+    /// 各 Agent 上次选择的授权方式、模型和推理强度，键为 Agent 标识（如 `antigravity`、`claude`、`gemini`）。
+    pub agent_preferences: BTreeMap<String, AgentPreferences>,
     /// 最近打开的目录，最新的在前，不重复。
     pub recent: Vec<PathBuf>,
     /// 最近打开的文件，最新的在前，不重复；所有窗口共用。
@@ -660,6 +680,7 @@ impl State {
             Some("fullAccess") => PermissionMode::FullAccess,
             _ => PermissionMode::Ask,
         };
+        state.agent_preferences = agent_preferences(root.get("agentPreferences"));
         state.markdown_toc_pinned =
             root.get("markdownTocPinned").and_then(Json::as_bool) == Some(true);
         state.vim_keys_noticed = root.get("vimKeysNoticed").and_then(Json::as_bool) == Some(true);
@@ -836,6 +857,9 @@ impl State {
         };
         if let Some(permissions) = permissions {
             fields.push(("agentPermissions", Json::String(permissions.into())));
+        }
+        if let Some(preferences) = agent_preferences_json(&self.agent_preferences) {
+            fields.push(("agentPreferences", preferences));
         }
         if self.markdown_toc_pinned {
             fields.push(("markdownTocPinned", Json::Bool(true)));
@@ -1469,6 +1493,54 @@ fn window_json(frame: &WindowFrame) -> Json {
         window.push(("y", Json::Number(y)));
     }
     Json::object(window)
+}
+
+/// 从 `state.json` 的 `agentPreferences` 一节读出各 Agent 保存的授权方式、模型与推理强度。
+fn agent_preferences(json: Option<&Json>) -> BTreeMap<String, AgentPreferences> {
+    let Some(entries) = json.and_then(Json::as_object) else {
+        return BTreeMap::new();
+    };
+    let text = |obj: &BTreeMap<String, Json>, key: &str| {
+        obj.get(key)
+            .and_then(Json::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    };
+    entries
+        .iter()
+        .filter(|(agent, _)| !agent.is_empty())
+        .filter_map(|(agent, value)| {
+            let obj = value.as_object()?;
+            let prefs = AgentPreferences {
+                mode: text(obj, "mode"),
+                model: text(obj, "model"),
+                effort: text(obj, "effort"),
+            };
+            (!prefs.is_empty()).then(|| (agent.clone(), prefs))
+        })
+        .collect()
+}
+
+/// 返回写进 `state.json` 的各 Agent 偏好；全部为空时返回 `None`。
+fn agent_preferences_json(preferences: &BTreeMap<String, AgentPreferences>) -> Option<Json> {
+    let entries: Vec<(String, Json)> = preferences
+        .iter()
+        .filter(|(agent, prefs)| !agent.is_empty() && !prefs.is_empty())
+        .filter_map(|(agent, prefs)| {
+            let mut items = Vec::new();
+            if let Some(mode) = prefs.mode.as_deref().filter(|s| !s.is_empty()) {
+                items.push(("mode", Json::String(mode.to_owned())));
+            }
+            if let Some(model) = prefs.model.as_deref().filter(|s| !s.is_empty()) {
+                items.push(("model", Json::String(model.to_owned())));
+            }
+            if let Some(effort) = prefs.effort.as_deref().filter(|s| !s.is_empty()) {
+                items.push(("effort", Json::String(effort.to_owned())));
+            }
+            (!items.is_empty()).then(|| (agent.clone(), Json::object(items)))
+        })
+        .collect();
+    (!entries.is_empty()).then(|| Json::Object(entries.into_iter().collect()))
 }
 
 /// 从 `state.json` 的 `window` 一节读出窗口的大小和位置；缺项或者数值不合理时为 `None`。

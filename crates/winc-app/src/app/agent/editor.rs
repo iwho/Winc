@@ -245,7 +245,15 @@ impl App {
         link: Link,
         diff: bool,
     ) {
-        if self.editor.workspace.as_ref().map(|ws| &ws.root) != Some(&root) {
+        let matches_agent = self
+            .agent
+            .as_ref()
+            .is_some_and(|panel| panel.root.as_deref() == Some(root.as_path()))
+            || self
+                .agent_peer
+                .as_ref()
+                .is_some_and(|panel| panel.root.as_deref() == Some(root.as_path()));
+        if !matches_agent && self.editor.workspace.as_ref().map(|ws| &ws.root) != Some(&root) {
             self.flash(t!("agent-project-changed"));
             return;
         }

@@ -311,10 +311,13 @@ impl SettingsPage {
                     S::AiTimeout,
                 ],
             )],
-            SettingsPage::Modules => vec![group(
-                t!("settings-page-modules"),
-                vec![S::GitModule, S::TerminalModule, S::RemoteModule],
-            )],
+            SettingsPage::Modules => vec![
+                group(
+                    t!("settings-page-modules"),
+                    vec![S::GitModule, S::TerminalModule, S::RemoteModule],
+                ),
+                group(t!("agent-title"), vec![S::AgentExpandProcess]),
+            ],
             SettingsPage::Format => {
                 let tools = |ids: &[&'static str], make: fn(&'static str) -> Setting, add| {
                     ids.iter().map(|&id| make(id)).chain([add]).collect()

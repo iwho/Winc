@@ -27,6 +27,7 @@ winit.workspace = true
 ropey.workspace = true
 arboard.workspace = true
 unicode-segmentation.workspace = true
+notify-rust = "4.19"
 
 # 全局分配器（large_alloc.rs，仅 macOS）的 mmap、munmap，测量（bench.rs）的 getrusage。
 [target.'cfg(unix)'.dependencies]

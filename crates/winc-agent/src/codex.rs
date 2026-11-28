@@ -28,7 +28,9 @@ const MACOS_BIN_DIRS: [&str; 2] = ["/opt/homebrew/bin", "/usr/local/bin"];
 type Job = (u64, Command);
 
 /// A lazily launched connection to the locally installed Codex App Server.
-pub struct CodexProvider {
+pub struct CodexProvider(Transport);
+
+struct Transport {
     commands: SyncSender<Job>,
     events: Receiver<Vec<Event>>,
     wake_pending: Arc<AtomicBool>,
@@ -47,7 +49,7 @@ impl CodexProvider {
         executable: Option<PathBuf>,
         wake: impl Fn() + Send + 'static,
     ) -> io::Result<Self> {
-        Self::connect_in(root, false, executable, wake)
+        Transport::connect_in(Backend::Codex, root, false, executable, wake).map(Self)
     }
 
     /// Starts Codex in Winc's dedicated directory for chats without a workspace.
@@ -59,10 +61,25 @@ impl CodexProvider {
         executable: Option<PathBuf>,
         wake: impl Fn() + Send + 'static,
     ) -> io::Result<Self> {
-        Self::connect_in(root, true, executable, wake)
+        Transport::connect_in(Backend::Codex, root, true, executable, wake).map(Self)
     }
+}
 
+pub(crate) fn connect(
+    backend: Backend,
+    root: PathBuf,
+    standalone: bool,
+    executable: Option<PathBuf>,
+    wake: impl Fn() + Send + 'static,
+) -> io::Result<Box<dyn AgentProvider>> {
+    Ok(Box::new(Transport::connect_in(
+        backend, root, standalone, executable, wake,
+    )?))
+}
+
+impl Transport {
     fn connect_in(
+        backend: Backend,
         root: PathBuf,
         standalone: bool,
         executable: Option<PathBuf>,
@@ -96,6 +113,7 @@ impl CodexProvider {
                     Ok(())
                 };
                 if let Err(failure) = supervise(
+                    backend,
                     &root,
                     standalone,
                     executable,
@@ -116,13 +134,23 @@ impl CodexProvider {
     }
 }
 
-impl Drop for CodexProvider {
+impl Drop for Transport {
     fn drop(&mut self) {
         self.shutdown.stop();
     }
 }
 
 impl AgentProvider for CodexProvider {
+    fn submit(&mut self, command: Command) -> Result<u64, SubmitError> {
+        self.0.submit(command)
+    }
+
+    fn drain(&mut self) -> Vec<Event> {
+        self.0.drain()
+    }
+}
+
+impl AgentProvider for Transport {
     fn submit(&mut self, command: Command) -> Result<u64, SubmitError> {
         if matches!(&command, Command::Send { text, .. } | Command::Steer { text, .. } if text.len() > MAX_PROMPT)
         {
@@ -156,6 +184,7 @@ impl Drop for ProcessGuard<'_> {
 }
 
 fn supervise(
+    backend: Backend,
     root: &Path,
     standalone: bool,
     executable: Option<PathBuf>,
@@ -163,7 +192,12 @@ fn supervise(
     shutdown: &Shutdown,
     publish: &impl Fn(Vec<Event>) -> Result<(), ()>,
 ) -> Result<(), Failure> {
-    let executable = codex_path(executable)?;
+    let (executable, args): (PathBuf, &[&str]) = match backend {
+        Backend::Codex => (codex_path(executable)?, &["app-server"]),
+        Backend::Gemini => (acp_path("gemini")?, &["--acp"]),
+        Backend::Antigravity => (acp_path("agy")?, &["acp"]),
+        Backend::Claude => (acp_path("claude-agent-acp")?, &[]),
+    };
     let root = if standalone {
         standalone_directory(root)?
     } else {
@@ -174,7 +208,7 @@ fn supervise(
     }
     let mut process = Process::new(executable);
     process
-        .arg("app-server")
+        .args(args)
         .current_dir(&root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -256,24 +290,31 @@ fn supervise(
                 .map_err(|_| Failure::Start)?,
         );
 
-        let mut client = Client::new(root, &wire_out);
-        client.send_request(
-            0,
-            request(
+        let mut client: Box<dyn WireClient> = if backend == Backend::Codex {
+            let mut client = Client::new(root, &wire_out);
+            client.send_request(
                 0,
-                "initialize",
-                json!({
-                    "clientInfo": {"name": "winc", "title": "Winc", "version": "1"},
-                }),
-            ),
-            Reply::Initialize,
-        )?;
+                request(
+                    0,
+                    "initialize",
+                    json!({
+                        "clientInfo": {"name": "winc", "title": "Winc", "version": "1"},
+                    }),
+                ),
+                Reply::Initialize,
+            )?;
+            Box::new(client)
+        } else {
+            let client = crate::acp::AcpClient::new(root, &wire_out);
+            client.initialize()?;
+            Box::new(client)
+        };
         loop {
             let mut events = Vec::new();
             let deadline = Instant::now() + BATCH_INTERVAL;
             for _ in 0..32 {
                 match jobs.try_recv() {
-                    Ok((id, cmd)) if client.ready => client.command(id, cmd, &mut events)?,
+                    Ok((id, cmd)) if client.ready() => client.command(id, cmd, &mut events)?,
                     Ok((id, _)) => events.push(Event::RequestFailed(id, Failure::Rejected(-32000))),
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => return Ok(()),
@@ -341,6 +382,26 @@ fn standalone_directory(root: &Path) -> Result<PathBuf, Failure> {
     Ok(resolved)
 }
 
+fn acp_path(name: &str) -> Result<PathBuf, Failure> {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let locations = std::env::split_paths(&path).filter(|path| path.is_absolute());
+    #[cfg(target_os = "macos")]
+    let locations = locations.chain(MACOS_BIN_DIRS.map(PathBuf::from));
+    let extensions: &[&str] = if cfg!(windows) {
+        &[".exe", ".cmd"]
+    } else {
+        &[""]
+    };
+    locations
+        .flat_map(|dir| {
+            extensions
+                .iter()
+                .map(move |extension| dir.join(format!("{name}{extension}")))
+        })
+        .find(|path| path.is_file())
+        .ok_or(Failure::ExecutableNotFound)
+}
+
 fn codex_path(configured: Option<PathBuf>) -> Result<PathBuf, Failure> {
     let name = if cfg!(windows) { "codex.exe" } else { "codex" };
     if let Some(configured) = configured {
@@ -405,6 +466,38 @@ fn read_frame(pipe: &mut impl BufRead, line: &mut Vec<u8>) -> Result<Value, Fail
         if end.is_some() {
             return serde_json::from_slice(line).map_err(|_| Failure::Protocol);
         }
+    }
+}
+
+pub(crate) trait WireClient {
+    fn ready(&self) -> bool;
+    fn command(
+        &mut self,
+        id: u64,
+        command: Command,
+        events: &mut Vec<Event>,
+    ) -> Result<(), Failure>;
+    fn receive(&mut self, value: Value, events: &mut Vec<Event>) -> Result<(), Failure>;
+    fn expire(&mut self, events: &mut Vec<Event>) -> Result<(), Failure>;
+}
+
+impl WireClient for Client<'_> {
+    fn ready(&self) -> bool {
+        self.ready
+    }
+    fn command(
+        &mut self,
+        id: u64,
+        command: Command,
+        events: &mut Vec<Event>,
+    ) -> Result<(), Failure> {
+        self.command(id, command, events)
+    }
+    fn receive(&mut self, value: Value, events: &mut Vec<Event>) -> Result<(), Failure> {
+        self.receive(value, events)
+    }
+    fn expire(&mut self, events: &mut Vec<Event>) -> Result<(), Failure> {
+        self.expire(events)
     }
 }
 

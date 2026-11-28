@@ -1,5 +1,6 @@
 //! Provider commands and events used by the editor. The client owns the provider process.
 
+mod acp;
 mod codex;
 mod protocol;
 
@@ -7,6 +8,53 @@ pub use codex::CodexProvider;
 pub use winc_config::PermissionMode;
 
 use std::path::PathBuf;
+
+/// Agent backend selectable in the editor.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub enum Backend {
+    /// OpenAI Codex App Server.
+    #[default]
+    Codex,
+    /// Claude Agent SDK through the ACP adapter.
+    Claude,
+    /// Gemini CLI in ACP mode.
+    Gemini,
+    /// Antigravity CLI in ACP mode.
+    Antigravity,
+}
+
+impl Backend {
+    /// Display name used by the backend picker.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+            Self::Gemini => "Gemini",
+            Self::Antigravity => "Antigravity",
+        }
+    }
+
+    /// Stable identifier used to persist per-backend preferences.
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+            Self::Gemini => "gemini",
+            Self::Antigravity => "antigravity",
+        }
+    }
+
+    /// Starts the selected backend on a supervised connection.
+    pub fn connect(
+        self,
+        root: PathBuf,
+        standalone: bool,
+        codex_executable: Option<PathBuf>,
+        wake: impl Fn() + Send + 'static,
+    ) -> std::io::Result<Box<dyn AgentProvider>> {
+        codex::connect(self, root, standalone, codex_executable, wake)
+    }
+}
 
 /// One account quota window.
 #[derive(Clone, Debug)]
@@ -74,6 +122,8 @@ pub enum Command {
     History(Option<String>),
     /// Discover models and supported reasoning efforts, with an optional page cursor.
     Models(Option<String>),
+    /// Discover available skills for the current workspace (Codex).
+    Skills,
     /// Start a turn in a loaded session.
     Send {
         /// Loaded session ID.
@@ -107,6 +157,145 @@ pub enum Command {
         /// Explicit user decision.
         decision: ApprovalDecision,
     },
+    /// Set a session-scoped execution/permission mode.
+    SetMode {
+        /// Loaded session ID.
+        session: String,
+        /// Mode ID advertised by the provider.
+        mode: String,
+    },
+    /// Set a session-scoped model ID.
+    SetModel {
+        /// Loaded session ID.
+        session: String,
+        /// Model ID advertised by the provider.
+        model: String,
+    },
+    /// Set a session-scoped reasoning effort / thinking level.
+    SetEffort {
+        /// Loaded session ID.
+        session: String,
+        /// Reasoning effort value advertised by the provider.
+        effort: String,
+    },
+    /// Answer one pending structured question / elicitation prompt.
+    AnswerElicitation {
+        /// Local handle to the server request.
+        elicitation: u64,
+        /// Explicit user response.
+        response: ElicitationResponse,
+    },
+}
+
+/// A session execution or permission mode advertised by the provider.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModeOption {
+    /// Mode identifier passed back to the provider.
+    pub id: String,
+    /// Human-readable mode label.
+    pub name: String,
+    /// Short description of the mode's behavior.
+    pub description: String,
+}
+
+/// A slash command or skill advertised by the provider for a session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SlashCommand {
+    /// Command name without the leading `/`.
+    pub name: String,
+    /// Human-readable description shown in completion menus.
+    pub description: String,
+    /// Optional argument hint when the command accepts input.
+    pub input_hint: Option<String>,
+}
+
+/// One selectable option in a structured prompt field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ElicitationOption {
+    /// Wire value returned when this option is chosen.
+    pub value: String,
+    /// Human-readable label shown to the user.
+    pub label: String,
+    /// Optional description shown beneath the label.
+    pub description: String,
+}
+
+/// Input control type for one field in an elicitation form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ElicitationFieldKind {
+    /// Choose one option from the list.
+    SingleSelect(Vec<ElicitationOption>),
+    /// Choose zero or more options from the list.
+    MultiSelect(Vec<ElicitationOption>),
+    /// True/false toggle.
+    Boolean,
+    /// Free-form text input.
+    Text,
+    /// Numeric input.
+    Number {
+        /// Whether only whole integers are accepted.
+        integer: bool,
+    },
+}
+
+/// One field in an agent-initiated structured question form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ElicitationField {
+    /// Property key in the response object.
+    pub name: String,
+    /// Human-readable question or field title.
+    pub title: String,
+    /// Optional helper description.
+    pub description: String,
+    /// Whether this field is required by the schema.
+    pub required: bool,
+    /// Control type and options.
+    pub kind: ElicitationFieldKind,
+    /// Optional default text value.
+    pub default_text: Option<String>,
+    /// Optional default selected option values.
+    pub default_values: Vec<String>,
+    /// Optional default boolean value.
+    pub default_bool: Option<bool>,
+}
+
+/// A structured question or selection prompt awaiting user input.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Elicitation {
+    /// Local handle for answering the request.
+    pub id: u64,
+    /// Session that originated this request.
+    pub session: String,
+    /// Prompt heading or explanation from the agent.
+    pub message: String,
+    /// Ordered form fields to display.
+    pub fields: Vec<ElicitationField>,
+}
+
+/// One field value submitted in response to an elicitation form.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ElicitationValue {
+    /// Text or single-select value.
+    String(String),
+    /// Multi-select values.
+    Strings(Vec<String>),
+    /// Boolean value.
+    Bool(bool),
+    /// Integer value.
+    Integer(i64),
+    /// Floating-point number value.
+    Number(f64),
+}
+
+/// User response to a pending elicitation request.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ElicitationResponse {
+    /// Accept the prompt with field values.
+    Accept(Vec<(String, ElicitationValue)>),
+    /// Decline the prompt without cancelling the whole turn.
+    Decline,
+    /// Cancel/dismiss the prompt.
+    Cancel,
 }
 
 /// Agent session metadata.
@@ -125,7 +314,7 @@ pub struct Session {
 }
 
 /// A model advertised by the provider.
-#[derive(Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Model {
     /// Identifier passed to a turn.
     pub id: String,
@@ -173,7 +362,7 @@ pub struct Turn {
 }
 
 /// A message or operation reported by the provider.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Item {
     /// Stable item ID within the turn.
     pub id: String,
@@ -207,6 +396,8 @@ pub enum ItemKind {
     User,
     /// An agent message.
     Message,
+    /// An interim agent message.
+    Commentary,
     /// A shell command.
     Command,
     /// A command reported as reading files.
@@ -290,6 +481,8 @@ pub enum ApprovalKind {
 pub enum DeltaKind {
     /// Markdown message body.
     Message,
+    /// Markdown body of an interim message.
+    Commentary,
     /// Proposed plan text.
     Plan,
     /// Tool output.
@@ -320,6 +513,8 @@ pub enum Failure {
 pub enum Event {
     /// Account quota windows, as advertised by Codex.
     RateLimits(Vec<RateLimitWindow>),
+    /// Whether the backend accepts images in prompts.
+    ImageInput(bool),
     /// The handshake completed and the account was checked.
     Ready {
         /// Whether Codex requires authentication and has no active account.
@@ -337,6 +532,8 @@ pub enum Event {
     History(u64, Vec<Session>, Option<String>),
     /// Response to a model listing.
     Models(u64, Vec<Model>, Option<String>),
+    /// Response to a Codex skills listing.
+    Skills(u64, Vec<SlashCommand>),
     /// A turn started, with a correlation ID for client-initiated sends when available.
     TurnStarted(Option<u64>, TurnKey),
     /// A turn reached a final state.
@@ -361,4 +558,29 @@ pub enum Event {
     Acknowledged(u64),
     /// Cumulative and most recent turn total token counts.
     Tokens(TurnKey, u64, u64, Option<u64>),
+    /// Account plan or tier label reported by the provider.
+    AccountTier(Option<String>),
+    /// Cumulative session cost reported by the provider.
+    SessionCost(String, f64, String),
+    /// Session-scoped execution/permission modes and active mode ID.
+    SessionModes(String, Vec<ModeOption>, Option<String>),
+    /// Session-scoped slash commands and skills advertised by the provider.
+    SessionCommands(String, Vec<SlashCommand>),
+    /// Session-scoped model catalog and active model/effort selection.
+    SessionModels {
+        /// Session ID.
+        session: String,
+        /// Available models.
+        models: Vec<Model>,
+        /// Active model ID.
+        current_model: Option<String>,
+        /// Active reasoning effort / thinking level.
+        current_effort: Option<String>,
+    },
+    /// A structured question/selection prompt is waiting for user input.
+    Elicitation(Elicitation),
+    /// A pending elicitation was resolved.
+    ElicitationResolved(u64),
+    /// A pending elicitation expired past the local deadline.
+    ElicitationExpired(u64),
 }

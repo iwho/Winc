@@ -275,6 +275,7 @@ pub enum Setting {
     AiTimeout,
     /// 终端模块的开关。
     TerminalModule,
+    AgentExpandProcess,
     /// 远程模块的开关。
     RemoteModule,
     /// 资源管理器的右键菜单（Windows），记在注册表里。
@@ -409,7 +410,9 @@ impl Setting {
             }
             S::ExplorerMenu | S::FileAssociations => SettingsPage::General,
             S::ExportSettings | S::ImportSettings => SettingsPage::General,
-            S::GitModule | S::TerminalModule | S::RemoteModule => SettingsPage::Modules,
+            S::GitModule | S::TerminalModule | S::RemoteModule | S::AgentExpandProcess => {
+                SettingsPage::Modules
+            }
             S::Version | S::Updates | S::ReleaseNotes | S::Website | S::Repository => {
                 SettingsPage::About
             }
@@ -525,6 +528,7 @@ impl Setting {
             S::AiModel => "ai.model",
             S::AiTimeout => "ai.timeout",
             S::TerminalModule => "terminal.enabled",
+            S::AgentExpandProcess => "agent.expandProcess",
             S::RemoteModule => "remote.enabled",
             S::GitTree | S::FormatCommand(_) | S::FixCommand(_) | S::AddLanguage => return None,
             // 各键的归属合在 `vim.handleKeys` 一项中，逐键改写和恢复默认。
@@ -655,6 +659,7 @@ impl Setting {
             Setting::AiTimeout => t!("settings-ai-timeout"),
             Setting::LatexPath => t!("settings-latex-path"),
             Setting::TerminalModule => t!("settings-terminal-module"),
+            Setting::AgentExpandProcess => t!("settings-agent-expand-process"),
             Setting::RemoteModule => t!("settings-remote-module"),
             Setting::ExplorerMenu => t!("settings-explorer-menu"),
             Setting::FileAssociations => t!("settings-file-associations"),
@@ -689,6 +694,7 @@ impl Setting {
             return Some(Cow::Owned(t!("settings-vim-key-desc", action = action)));
         }
         let text = match self {
+            Setting::AgentExpandProcess => Some(t!("settings-agent-expand-process-desc")),
             Setting::SystemTitleBar => Some(t!("settings-system-title-bar-desc")),
             Setting::Zoom => Some(t!("settings-ui-zoom-desc")),
             Setting::AutoSave => Some(t!("settings-auto-save-desc")),
@@ -868,6 +874,7 @@ impl Setting {
             | Setting::ExplorerMenu
             | Setting::FileAssociations
             | Setting::TerminalModule
+            | Setting::AgentExpandProcess
             | Setting::RemoteModule
             | Setting::TerminalCopyOnSelect
             | Setting::TerminalConfirmClose

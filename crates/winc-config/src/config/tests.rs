@@ -400,6 +400,7 @@ fn round_trips_through_json() {
         }],
         terminal_enabled: Some(true),
         agent_enabled: Some(false),
+        agent_expand_process: Some(false),
         agent_executable: Some("/opt/homebrew/bin/codex".to_owned()),
         terminal_font: Some("Menlo".to_owned()),
         terminal_size: Some(12.0),

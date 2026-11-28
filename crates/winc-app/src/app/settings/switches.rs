@@ -61,6 +61,7 @@ impl App {
             Setting::GitStagingArea => self.config.git_staging_area == Some(true),
             Setting::GitCombinedDiff => self.config.git_combined_diff == Some(true),
             Setting::TerminalModule => self.terminal_enabled(),
+            Setting::AgentExpandProcess => self.config.agent_expand_process.unwrap_or(true),
             Setting::RemoteModule => self.remote_enabled(),
             Setting::ExplorerMenu => self.settings.integration.menu,
             Setting::FileAssociations => self.settings.integration.types,
@@ -159,6 +160,7 @@ impl App {
             Setting::GitAutoFetch => self.config.git_auto_fetch = Some(on),
             Setting::GitGenerateCommitMessage => self.config.git_generate_commit_message = Some(on),
             Setting::TerminalModule => self.config.terminal_enabled = Some(on),
+            Setting::AgentExpandProcess => self.config.agent_expand_process = Some(on),
             Setting::RemoteModule => self.config.remote_enabled = Some(on),
             Setting::ExplorerMenu => {
                 crate::shell_integration::show_menu(on);

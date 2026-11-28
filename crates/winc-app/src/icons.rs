@@ -1283,14 +1283,18 @@ pub fn shrink(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip: R
 
 /// 绘制「复制」图标，约 12×12：两张错开叠放的圆角方块，前面一张完整，后面一张只露出左上角。
 pub fn copy(frame: &mut Frame<'_>, (cx, cy): (f32, f32), color: Color, clip: Rect) {
-    let (size, r, shift) = (8.0, 1.5, 3.5);
-    let (x, y) = (cx - size / 2.0 + shift / 2.0, cy - size / 2.0 + shift / 2.0);
-    frame.stroke(&rounded_outline(x, y, size, size, r), STROKE, color, clip);
+    let (width, height, r, shift) = (8.0, 10.0, 1.0, 3.0);
+    let (x, y) = (cx - width / 2.0 + shift / 2.0, cy - height / 2.0 + shift / 2.0);
+    frame.stroke(&rounded_outline(x, y, width, height, r), STROKE, color, clip);
     let (bx, by) = (x - shift, y - shift);
     let back = [
-        Stroke::Line(bx, y, bx, by + r),
+        Stroke::Line(x - 1.0, by + height, bx + r, by + height),
+        Stroke::Arc(bx + r, by + height - r, r, FRAC_PI_2, PI),
+        Stroke::Line(bx, by + height - r, bx, by + r),
         Stroke::Arc(bx + r, by + r, r, -PI, -FRAC_PI_2),
-        Stroke::Line(bx + r, by, x, by),
+        Stroke::Line(bx + r, by, bx + width - r, by),
+        Stroke::Arc(bx + width - r, by + r, r, -FRAC_PI_2, 0.0),
+        Stroke::Line(bx + width, by + r, bx + width, y - 1.0),
     ];
     frame.stroke(&back, STROKE, color, clip);
 }

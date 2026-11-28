@@ -628,6 +628,7 @@ impl App {
         let recents = |state: &State| (state.recent.clone(), state.recent_files.clone());
         let changed = recents(&state) != recents(&self.state);
         self.state = state;
+        self.sync_agent_preferences();
         if changed {
             self.sync_system_recents();
             // 开始页、菜单和选择面板按序号记着最近列表里的项：列表变了，画面上的还是旧的。

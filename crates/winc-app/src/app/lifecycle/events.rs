@@ -499,6 +499,7 @@ impl App {
             UserEvent::AgentPath(root, real, link, diff) => {
                 self.finish_agent_link(root, real, link, diff)
             }
+            UserEvent::AgentWorktrees => self.poll_agent_worktrees(),
             UserEvent::Definitions => self.poll_definitions(),
             UserEvent::FilesChanged => self.files_changed(),
             UserEvent::GitQuestion => self.poll_git_questions(),

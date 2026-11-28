@@ -1,4 +1,14 @@
 agent-title = Codex
+agent-notification-completed = Winc · Agent task complete
+agent-notification-completed-body = The task in “{ $session }” has completed.
+agent-process = Execution process
+agent-process-tools = { $count ->
+    [one] Execution process · 1 tool call
+   *[other] Execution process · { $count } tool calls
+    }
+agent-process-duration = { $summary } · { $duration }
+settings-agent-expand-process = Expand execution process by default
+settings-agent-expand-process-desc = Show interim replies and tool calls while Codex works. The process collapses when the turn ends.
 agent-new = New chat
 agent-connecting = Connecting to Codex…
 agent-login = Run codex login in a terminal, then select Reconnect.
@@ -6,6 +16,7 @@ agent-unavailable = Codex is unavailable.
 agent-reconnect = Reconnect
 agent-awaiting = Waiting for approval
 agent-opening = Opening chat…
+agent-thinking = Thinking…
 agent-running = Running
 agent-interrupted = Interrupted
 agent-completed = Completed
@@ -115,3 +126,35 @@ agent-sun = Sunday
 agent-next-weekday = Next { $day }
 
 agent-split = Split / merge chats
+agent-backend-connecting = Connecting to agent…
+agent-backend-unavailable = Agent unavailable.
+agent-backend-failed = The agent could not finish the task.
+agent-backend-placeholder = Message the agent
+agent-empty-backend = Start a conversation with { $name }
+agent-no-claude = Install claude-agent-acp and add it to PATH.
+agent-no-gemini = Install Gemini CLI and add it to PATH.
+agent-image-unsupported = This agent does not accept image attachments.
+
+agent-no-antigravity = Install Antigravity CLI, add agy to PATH, and sign in with agy acp --login.
+agent-antigravity-login = Run agy acp --login in a terminal, then select Reconnect.
+agent-backend-login = Sign in to this agent in a terminal, then select Reconnect.
+agent-backend-history-empty = No saved { $name } chats for this project.
+agent-awaiting-input = Waiting for input
+agent-question-title = Input requested
+agent-question-submit = Submit
+agent-question-decline = Skip
+agent-question-cancel = Cancel
+agent-question-expired = Input request expired
+agent-question-placeholder = Enter a custom response…
+agent-question-yes = Yes
+agent-question-no = No
+agent-worktree-local = Local
+agent-worktree-local-detail = Current local project folder
+agent-worktree-main = Main worktree
+agent-worktree-new = New worktree
+agent-worktree-new-detail = Create an isolated Git worktree from HEAD
+agent-worktree-creating = Creating…
+agent-worktree-create-failed = Couldn’t create worktree: { $error }
+agent-worktree-detached = { $oid } (detached HEAD)
+agent-worktree-tooltip = Switch Git worktree
+agent-worktree-busy = Wait for the active task to finish before switching worktrees

@@ -4,9 +4,9 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use winc_agent::{AgentProvider, CodexProvider, Command, Event, TurnStatus};
+use winc_agent::{AgentProvider, Backend, CodexProvider, Command, Event, TurnStatus};
 
-fn wait(provider: &mut CodexProvider, timeout: Duration, mut inspect: impl FnMut(Event) -> bool) {
+fn wait(provider: &mut dyn AgentProvider, timeout: Duration, mut inspect: impl FnMut(Event) -> bool) {
     let deadline = Instant::now() + timeout;
     loop {
         for event in provider.drain() {
@@ -283,4 +283,87 @@ fn an_exiting_server_reports_disconnect_and_can_be_replaced() {
     });
     drop(provider);
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[ignore = "uses the locally signed-in Antigravity CLI"]
+fn live_antigravity_history() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let mut provider = Backend::Antigravity
+        .connect(root.clone(), false, None, || {})
+        .unwrap();
+    let timeout = Duration::from_secs(30);
+    wait(&mut *provider, timeout, |event| {
+        println!("INIT EVENT: {event:?}");
+        matches!(event, Event::Ready { .. })
+    });
+    let new_id = provider.submit(Command::NewSession).unwrap();
+    let hist_id = provider.submit(Command::History(None)).unwrap();
+    let mut got_new = false;
+    let mut history_sessions = None;
+    wait(&mut *provider, timeout, |event| {
+        match &event {
+            Event::SessionOpened(id, session, _, _) if *id == new_id => {
+                println!("NEW SESSION: {}", session.id);
+                got_new = true;
+            }
+            Event::History(id, sessions, cursor) if *id == hist_id => {
+                println!(
+                    "HISTORY ({} sessions, cursor={cursor:?}): {:?}",
+                    sessions.len(),
+                    sessions
+                        .iter()
+                        .map(|s| (&s.id, &s.title))
+                        .collect::<Vec<_>>()
+                );
+                history_sessions = Some(sessions.clone());
+            }
+            other => println!("OTHER EVENT: {other:?}"),
+        }
+        got_new && history_sessions.is_some()
+    });
+    let sessions = history_sessions.unwrap();
+    assert!(
+        !sessions.is_empty(),
+        "expected historical Antigravity sessions for {root:?}"
+    );
+    let target = sessions[0].id.clone();
+    let resume_id = provider.submit(Command::Resume(target.clone())).unwrap();
+    wait(&mut *provider, timeout, |event| match event {
+        Event::SessionOpened(id, session, turns, _) if id == resume_id => {
+            println!(
+                "RESUMED {}: title={:?}, turns={}",
+                session.id,
+                session.title,
+                turns.len()
+            );
+            assert_eq!(session.id, target);
+            true
+        }
+        other => {
+            println!("RESUME OTHER: {other:?}");
+            false
+        }
+    });
+    if let Some(oldest) = sessions.last().filter(|s| s.id != target) {
+        let fallback_id = provider.submit(Command::Resume(oldest.id.clone())).unwrap();
+        wait(&mut *provider, timeout, |event| match event {
+            Event::SessionOpened(id, session, turns, _) if id == fallback_id => {
+                println!(
+                    "RESUMED OLDEST {}: title={:?}, turns={}",
+                    session.id,
+                    session.title,
+                    turns.len()
+                );
+                assert_eq!(session.id, oldest.id);
+                true
+            }
+            _ => false,
+        });
+    }
 }

@@ -181,3 +181,75 @@ fn agent_header_groups_session_actions_before_panel_controls() {
         assert!(gaps[1] > gaps[0]);
     }
 }
+
+#[test]
+fn agent_split_draws_solid_divider_without_bleeding_editor_underneath() {
+    use crate::app::agent::Hit;
+    use winit::window::CursorIcon;
+
+    let root = sample_folder("agent-split-divider");
+    let mut app = app_with(&root, false);
+    let file = app
+        .editor
+        .workspace
+        .as_ref()
+        .unwrap()
+        .root
+        .join("short.rs");
+    app.open_path(&file);
+    app.toggle_agent();
+    app.agent.as_mut().unwrap().width = 600.0;
+    paint(&mut app);
+    let split = app
+        .agent
+        .as_ref()
+        .unwrap()
+        .hits
+        .iter()
+        .find_map(|(rect, hit)| matches!(hit, Hit::Split).then_some(*rect))
+        .unwrap();
+    click(&mut app, (split.x + split.w / 2.0, split.y + split.h / 2.0));
+    assert!(app.agent_split);
+
+    for maximized in [false, true] {
+        app.agent.as_mut().unwrap().maximized = maximized;
+        paint(&mut app);
+
+        let whole = app.agent_rects().body;
+        let divider_x = whole.x + ((whole.w - 1.0) * 0.5).floor();
+        for offset in [48.0, 64.0, 80.0, 120.0] {
+            let y = whole.y + offset;
+            assert!(near(pixel(&app, (divider_x + 0.5, y)), app.palette.border));
+            assert!(near(
+                pixel(&app, (divider_x - 1.5, y)),
+                app.palette.editor_bg
+            ));
+            assert!(near(
+                pixel(&app, (divider_x + 1.5, y)),
+                app.palette.editor_bg
+            ));
+        }
+
+        if !maximized {
+            let text = app.layout.text;
+            app.on_mouse_move(text.x + 24.0, text.y + 40.0);
+            assert_eq!(app.pointer.cursor_icon, CursorIcon::Text);
+
+            let edge = app.agent_rects().divider;
+            app.on_mouse_move(edge.x + edge.w * 0.5, edge.y + 80.0);
+            assert_eq!(app.pointer.cursor_icon, CursorIcon::EwResize);
+        }
+
+        for x in [whole.x + 80.0, divider_x + 0.5, whole.right() - 80.0] {
+            app.on_mouse_move(x, whole.y + 120.0);
+            assert_eq!(app.pointer.cursor_icon, CursorIcon::Default);
+        }
+
+        let left_field = app.agent.as_ref().unwrap().field.view.area;
+        let right_field = app.agent_peer.as_ref().unwrap().field.view.area;
+        for field in [left_field, right_field] {
+            app.on_mouse_move(field.x + 10.0, field.y + field.h * 0.5);
+            assert_eq!(app.pointer.cursor_icon, CursorIcon::Text);
+        }
+    }
+}

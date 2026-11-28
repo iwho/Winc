@@ -753,6 +753,7 @@ impl App {
         self.run_when_loaded();
         self.advance_search();
         self.advance_images();
+        self.advance_agent_stream(Instant::now());
     }
 
     /// 按各区域在屏幕上的滚动位置（见 `App::begin_scroll_frame`）用 `renderer` 绘制并提交一帧，

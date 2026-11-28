@@ -386,6 +386,9 @@ workspace-tip-expand-unchanged = Expand all unchanged regions
 workspace-tip-collapse-unchanged = Collapse unchanged regions
 workspace-tip-close-tab = Close
 workspace-tip-all-tabs = Show all tabs
+workspace-tip-new-tab = New tab
+workspace-tip-maximize-window = Maximize window
+workspace-tip-restore-window = Restore window
 workspace-tip-commit-changes = { $count ->
     [one] Commit · 1 change
    *[other] Commit · { $count } changes

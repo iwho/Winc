@@ -195,6 +195,25 @@ fn sample() -> State {
         pdf_thumbnails_hidden: true,
         markdown_toc_pinned: true,
         agent_permissions: PermissionMode::AutoReview,
+        agent_preferences: [
+            (
+                "antigravity".into(),
+                AgentPreferences {
+                    mode: Some("auto".into()),
+                    model: Some("gemini-4-neon".into()),
+                    effort: Some("high".into()),
+                },
+            ),
+            (
+                "claude".into(),
+                AgentPreferences {
+                    mode: Some("acceptEdits".into()),
+                    model: Some("claude-sonnet-4".into()),
+                    effort: None,
+                },
+            ),
+        ]
+        .into(),
         recent_languages: vec!["markdown".to_owned(), "json".to_owned()],
         vim_marks: vec![('A', PathBuf::from("/a/项目/x.rs"), 12, 3)],
         vim_commands: vec!["%s/a/b/g".into(), "w".into()],
@@ -810,5 +829,64 @@ fn codex_permission_modes_round_trip() {
     assert_eq!(
         State::parse(r#"{"agentPermissions":"unknown"}"#).agent_permissions,
         PermissionMode::Ask
+    );
+}
+
+#[test]
+fn agent_preferences_round_trip_per_agent_and_ignore_empty_entries() {
+    let state = State {
+        agent_preferences: [
+            (
+                "antigravity".into(),
+                AgentPreferences {
+                    mode: Some("auto".into()),
+                    model: Some("gemini-4-neon".into()),
+                    effort: Some("high".into()),
+                },
+            ),
+            (
+                "gemini".into(),
+                AgentPreferences {
+                    mode: Some("yolo".into()),
+                    model: None,
+                    effort: None,
+                },
+            ),
+            ("empty".into(), AgentPreferences::default()),
+        ]
+        .into(),
+        ..State::default()
+    };
+    let parsed = State::parse(&state.to_json());
+    assert_eq!(parsed.agent_preferences.len(), 2);
+    assert_eq!(
+        parsed.agent_preferences.get("antigravity"),
+        Some(&AgentPreferences {
+            mode: Some("auto".into()),
+            model: Some("gemini-4-neon".into()),
+            effort: Some("high".into()),
+        })
+    );
+    assert_eq!(
+        parsed.agent_preferences.get("gemini"),
+        Some(&AgentPreferences {
+            mode: Some("yolo".into()),
+            model: None,
+            effort: None,
+        })
+    );
+    assert!(!parsed.agent_preferences.contains_key("empty"));
+
+    let malformed = State::parse(
+        r#"{"agentPreferences":{"": {"mode":"x"}, "bad": 123, "blank": {"mode":""}, "claude":{"mode":"plan","effort":""}}}"#,
+    );
+    assert_eq!(malformed.agent_preferences.len(), 1);
+    assert_eq!(
+        malformed.agent_preferences.get("claude"),
+        Some(&AgentPreferences {
+            mode: Some("plan".into()),
+            model: None,
+            effort: None,
+        })
     );
 }

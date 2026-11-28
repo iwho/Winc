@@ -593,12 +593,15 @@ impl App {
         }
     }
 
+    pub(crate) fn new_tab_opens_menu(&self) -> bool {
+        self.terminal_enabled() && self.editor.documents.iter().any(|doc| doc.terminal)
+    }
+
     /// 点击标签栏的「+」：编辑区有终端时在按钮下方弹出新建文件、新建终端的菜单，否则直接新建
     /// 文件。
     pub(in crate::app) fn press_new_tab(&mut self) {
         use crate::app::input::context_menu::{MenuButton, MenuTarget, menu_below};
-        let terminals = self.editor.documents.iter().any(|doc| doc.terminal);
-        if !(terminals && self.terminal_enabled()) {
+        if !self.new_tab_opens_menu() {
             return self.new_file();
         }
         let button = self.tabs.new_tab;

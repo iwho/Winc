@@ -650,6 +650,7 @@ const VIM: &[Field] = &[
 
 const AGENT: &[Field] = &[
     bool_field!("enabled", agent_enabled),
+    bool_field!("expandProcess", agent_expand_process),
     string_field!("executable", agent_executable),
 ];
 

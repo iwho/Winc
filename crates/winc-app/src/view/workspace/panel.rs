@@ -853,13 +853,43 @@ pub(in crate::view) fn over(bg: Color, fg: Color) -> Color {
 
 /// 返回面板内按钮的悬停提示（按钮矩形和提示文本）；没有提示时返回 `None`。
 pub(in crate::view) fn tooltip(app: &App) -> Option<(Rect, String)> {
-    use crate::app::{CommitTarget, DiffTarget};
+    use crate::app::{CommitTarget, DiffTarget, WindowControl};
     use crate::keymap::Action;
     use crate::layout::with_key;
     match app.pointer.hover {
+        Hover::WindowControl(control) if app.layout.controls.w > 0.0 => {
+            let (rect, _) = app
+                .window_control_rects()
+                .into_iter()
+                .find(|&(_, c)| c == control)?;
+            let label = match control {
+                WindowControl::Minimize => t!("menu-window-minimize").to_owned(),
+                WindowControl::Maximize if app.window_maximized() => {
+                    t!("workspace-tip-restore-window").to_owned()
+                }
+                WindowControl::Maximize => t!("workspace-tip-maximize-window").to_owned(),
+                WindowControl::Close => with_key(t!("cmd-close-window"), Some(Action::CloseWindow)),
+            };
+            Some((rect, label))
+        }
+        Hover::NewTab => {
+            let label = if app.new_tab_opens_menu() {
+                t!("workspace-tip-new-tab").to_owned()
+            } else {
+                with_key(t!("cmd-new-file"), Some(Action::NewFile))
+            };
+            Some((app.tabs.new_tab, label))
+        }
         Hover::TerminalHeader(hit @ crate::app::terminal::HeaderHit::New) => {
             let rect = app.terminal_hovered_hit(hit)?;
             Some((rect, t!("terminal-new").to_owned()))
+        }
+        Hover::TerminalHeader(
+            hit @ (crate::app::terminal::HeaderHit::Close(_)
+            | crate::app::terminal::HeaderHit::SearchClose),
+        ) => {
+            let rect = app.terminal_hovered_hit(hit)?;
+            Some((rect, t!("workspace-tip-close-tab").to_owned()))
         }
         Hover::TerminalHeader(hit @ crate::app::terminal::HeaderHit::Tab(i))
             if app.terminal_tab_list().is_some() =>

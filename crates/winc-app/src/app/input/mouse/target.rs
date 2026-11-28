@@ -378,9 +378,10 @@ impl App {
         if let Some(control) = self.window_control_at(x, y) {
             return Target::WindowControl(control);
         }
-        // 最大化的 Git 面板盖住了编辑区：编辑区里的补全、选区工具、改动卡片和冲突按钮在面板下面，
-        // 不响应；提示条、快速打开面板和查找对话框仍在面板上面。
-        let under_panel = self.git.panel.full && self.in_git_panel(x, y);
+        // 最大化的 Git 面板和 Agent 面板盖住了编辑区：编辑区里的补全、选区工具、改动卡片和冲突按钮
+        // 在面板下面，不响应；提示条、快速打开面板和查找对话框仍在面板上面。
+        let in_agent = self.agent_rects().body.contains(x, y);
+        let under_panel = (self.git.panel.full && self.in_git_panel(x, y)) || in_agent;
         // 链接地址的补全列表浮在文字上。
         if let Some(card) = self.hits.suggest_card
             && card.contains(x, y)
@@ -439,6 +440,12 @@ impl App {
         // Git 面板最大化时盖在侧栏、编辑区和终端上面：先于它们判断。
         if let Some(target) = self.git_panel_target(x, y) {
             return target;
+        }
+        if in_agent && !l.sidebar_button.contains(x, y) {
+            if y < TOP_BAR_END && !self.agent_caption_controls().any(|r| r.contains(x, y)) {
+                return Target::TitleBar;
+            }
+            return Target::Blocked;
         }
         if self.hits.tree_more.is_some_and(|more| more.contains(x, y)) {
             return Target::TreeMore;
@@ -809,6 +816,10 @@ impl App {
             {
                 return Some((Scrollbar::TreeHorizontal, grab(x, thumb.x, thumb.w)));
             }
+            return None;
+        }
+
+        if self.agent_rects().body.contains(x, y) {
             return None;
         }
 

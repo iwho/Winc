@@ -599,6 +599,7 @@ impl App {
             || self.tooltip_fading_in()
             || (self.disk.loads.bar).is_some_and(|b| b.clock.is_some())
             || self.http_animating()
+            || self.agent_animating()
             || ((self.git.branch.running.is_some()
                 || self.git.branch.finished.is_some()
                 || self.commit_refreshing()

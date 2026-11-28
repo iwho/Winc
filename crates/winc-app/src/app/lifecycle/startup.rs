@@ -56,6 +56,7 @@ impl App {
             agent_peer: None,
             agent_split: false,
             agent_focus_right: false,
+            agent_worktrees: agent::WorktreeChannel::default(),
             run: terminal::run::RunConfigs::default(),
             store: crate::app::settings::Store {
                 saved_config: config.clone(),

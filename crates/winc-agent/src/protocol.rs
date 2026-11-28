@@ -90,6 +90,7 @@ fn session(thread: &Value) -> Option<Session> {
         title: bounded(
             thread["name"]
                 .as_str()
+                .filter(|name| !name.trim().is_empty())
                 .or(thread["preview"].as_str())
                 .unwrap_or_default(),
             512,
@@ -111,6 +112,51 @@ fn model(value: &Value) -> Option<Model> {
         default_effort: string(&value["defaultReasoningEffort"]),
         is_default: value["isDefault"] == true,
     })
+}
+
+fn skills(result: &Value) -> Vec<SlashCommand> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push = |entry: &Value| {
+        if out.len() >= 256 || entry["enabled"].as_bool() == Some(false) {
+            return;
+        }
+        let Some(raw) = entry["name"].as_str() else {
+            return;
+        };
+        let name = raw.trim().trim_start_matches(['$', '/']);
+        if name.is_empty() || name.chars().any(char::is_whitespace) {
+            return;
+        }
+        let name = bounded(name, 128);
+        if !seen.insert(name.to_ascii_lowercase()) {
+            return;
+        }
+        let description = entry["shortDescription"]
+            .as_str()
+            .or_else(|| entry["interface"]["shortDescription"].as_str())
+            .or_else(|| entry["description"].as_str())
+            .map(str::trim)
+            .unwrap_or_default();
+        out.push(SlashCommand {
+            name,
+            description: bounded(description, 512),
+            input_hint: None,
+        });
+    };
+    for entry in array(&result["data"]) {
+        if let Some(nested) = entry["skills"].as_array() {
+            for item in nested {
+                push(item);
+            }
+        } else {
+            push(entry);
+        }
+    }
+    for item in array(&result["skills"]) {
+        push(item);
+    }
+    out
 }
 
 fn changes(value: &Value) -> (Vec<PathBuf>, String, Vec<Option<LineChanges>>) {
@@ -157,6 +203,10 @@ fn line_changes(change: &Value) -> Option<LineChanges> {
     Some(stat)
 }
 
+fn is_commentary(value: &Value) -> bool {
+    value["type"] == "agentMessage" && value["phase"] == "commentary"
+}
+
 fn item(value: &Value) -> Option<Item> {
     let id = string(&value["id"])?;
     let mut text = String::new();
@@ -176,6 +226,8 @@ fn item(value: &Value) -> Option<Item> {
             text = bounded(value["text"].as_str().unwrap_or_default(), MAX_MESSAGE);
             if value["type"] == "plan" {
                 ItemKind::Plan
+            } else if is_commentary(value) {
+                ItemKind::Commentary
             } else {
                 ItemKind::Message
             }
@@ -301,6 +353,7 @@ pub(super) enum Reply {
     Older(String),
     History,
     Models,
+    Skills,
     Send(String),
     Steer(TurnKey),
     Stop,
@@ -321,6 +374,7 @@ struct PendingApproval {
 pub(super) struct Protocol {
     approvals: HashMap<u64, PendingApproval>,
     loaded: HashSet<String>,
+    commentary: HashSet<(TurnKey, String)>,
     // Some servers send the file item before its approval request, others publish a patch update.
     file_reviews: HashMap<(TurnKey, String), String>,
 }
@@ -358,6 +412,11 @@ impl Protocol {
                 "model/list",
                 json!({"cursor": cursor, "includeHidden": false}),
                 Reply::Models,
+            ),
+            Command::Skills => (
+                "skills/list",
+                json!({"cwds": [root], "forceReload": false}),
+                Reply::Skills,
             ),
             Command::Send {
                 session,
@@ -477,6 +536,7 @@ impl Protocol {
                 array(&result["data"]).iter().filter_map(model).collect(),
                 string(&result["nextCursor"]),
             ),
+            Reply::Skills => Event::Skills(id, skills(result)),
             Reply::Send(session) => {
                 let turn = turn(&session, &result["turn"])?;
                 Event::TurnStarted(Some(id), turn.key)
@@ -554,6 +614,7 @@ impl Protocol {
                 if method == "turn/started" {
                     Event::TurnStarted(None, turn.key)
                 } else {
+                    self.commentary.retain(|(key, _)| key != &turn.key);
                     self.file_reviews.retain(|(key, _), _| key != &turn.key);
                     self.approvals.retain(|id, pending| {
                         if pending.turn == turn.key {
@@ -582,9 +643,20 @@ impl Protocol {
                 }
             }
             "item/started" | "item/completed" => {
-                let (Some(key), Some(item)) = (key(params), item(&params["item"])) else {
+                let Some(key) = key(params) else {
                     return;
                 };
+                let value = &params["item"];
+                let Some(mut item) = item(value) else {
+                    return;
+                };
+                if item.kind == ItemKind::Commentary {
+                    self.commentary.insert((key.clone(), item.id.clone()));
+                } else if item.kind == ItemKind::Message
+                    && self.commentary.contains(&(key.clone(), item.id.clone()))
+                {
+                    item.kind = ItemKind::Commentary;
+                }
                 if method == "item/started" && item.kind == ItemKind::FileChange {
                     self.remember_file_review(
                         &key,
@@ -671,7 +743,12 @@ impl Protocol {
                     return;
                 };
                 let (kind, limit) = if method == "item/agentMessage/delta" {
-                    (DeltaKind::Message, MAX_MESSAGE)
+                    let kind = if self.commentary.contains(&(key.clone(), id.clone())) {
+                        DeltaKind::Commentary
+                    } else {
+                        DeltaKind::Message
+                    };
+                    (kind, MAX_MESSAGE)
                 } else {
                     (DeltaKind::Output, MAX_OUTPUT)
                 };
@@ -906,6 +983,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn identifies_commentary_in_live_messages_and_history() {
+        let mut protocol = Protocol::default();
+        let mut events = Vec::new();
+        for (id, phase) in [("progress", "commentary"), ("answer", "final_answer")] {
+            let message = json!({
+                "type": "agentMessage", "id": id, "phase": phase, "text": id
+            });
+            let params = json!({"threadId": "s", "turnId": "t", "item": message});
+            protocol.notification("item/started", &params, &mut events);
+            protocol.notification(
+                "item/agentMessage/delta",
+                &json!({"threadId": "s", "turnId": "t", "itemId": id, "delta": id}),
+                &mut events,
+            );
+            protocol.notification("item/completed", &params, &mut events);
+            assert_eq!(
+                item(&message).unwrap().kind,
+                if id == "answer" {
+                    ItemKind::Message
+                } else {
+                    ItemKind::Commentary
+                }
+            );
+        }
+        assert!(matches!(
+            events.as_slice(),
+            [Event::Item(_, started, false), Event::Delta(_, _, DeltaKind::Commentary, _),
+             Event::Item(_, completed, true), Event::Item(_, answer, false),
+             Event::Delta(_, _, DeltaKind::Message, _), Event::Item(_, _, true)]
+                if started.kind == ItemKind::Commentary && completed.kind == ItemKind::Commentary
+                    && answer.kind == ItemKind::Message
+        ));
+    }
+
+    #[test]
     fn reads_codex_quota_windows_and_converts_usage_to_remaining() {
         let limits = rate_limits(&json!({"rateLimitsByLimitId": {"codex": {
             "primary": {"usedPercent": 60.5, "windowDurationMins": 300, "resetsAt": 12345},
@@ -1058,5 +1170,37 @@ mod tests {
         assert_eq!(input[1]["type"], "image");
         assert_eq!(input[1]["url"], "data:image/png;base64,iVBORw==");
         assert_eq!(turn_input(String::new(), Some(&[0])).len(), 1);
+    }
+
+    #[test]
+    fn skills_list_request_and_response_parse_nested_and_flat_entries() {
+        let mut protocol = Protocol::default();
+        let root = Path::new("/project");
+        let (req, reply) = protocol.command(7, Command::Skills, root).unwrap();
+        assert_eq!(req["method"], "skills/list");
+        assert_eq!(req["params"]["cwds"][0], "/project");
+        assert!(matches!(reply, Some(Reply::Skills)));
+
+        let nested = json!({
+            "data": [{
+                "cwd": "/project",
+                "skills": [
+                    {"name": "code-review", "shortDescription": "Review changes", "enabled": true},
+                    {"name": "disabled-skill", "description": "Skip me", "enabled": false},
+                    {"name": "CODE-REVIEW", "description": "Duplicate ignored"}
+                ]
+            }],
+            "skills": [
+                {"name": "$refactor", "description": "Refactor module"}
+            ]
+        });
+        let Some(Event::Skills(7, list)) = protocol.reply(7, Reply::Skills, &nested, root) else {
+            panic!("expected Skills event");
+        };
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name, "code-review");
+        assert_eq!(list[0].description, "Review changes");
+        assert_eq!(list[1].name, "refactor");
+        assert_eq!(list[1].description, "Refactor module");
     }
 }

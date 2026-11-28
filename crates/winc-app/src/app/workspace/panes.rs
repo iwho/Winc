@@ -470,9 +470,12 @@ impl App {
             || (self.overlays.picker.open && self.layout.picker.contains(x, y))
     }
 
-    /// `(x, y)` 所在的前台以外的窗格；被浮层遮住时为 `None`。
+    /// `(x, y)` 所在的前台以外的窗格；被浮层或上层面板遮住时为 `None`。
     pub(in crate::app) fn background_pane_at(&self, x: f32, y: f32) -> Option<PaneId> {
-        if self.overlay_covers(x, y) {
+        if self.overlay_covers(x, y)
+            || (self.git.panel.full && self.in_git_panel(x, y))
+            || self.agent_rects().body.contains(x, y)
+        {
             return None;
         }
         let focused = self.editor.panes.focused;

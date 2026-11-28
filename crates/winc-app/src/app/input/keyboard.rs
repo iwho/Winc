@@ -120,10 +120,20 @@ impl App {
         if self.focus == Focus::Agent
             && event.logical_key == Key::Named(NamedKey::Escape)
             && let Some(panel) = &mut self.agent
-            && std::mem::take(&mut panel.permissions_open)
         {
-            self.request_redraw();
-            return;
+            if std::mem::take(&mut panel.permissions_open)
+                || std::mem::take(&mut panel.worktree_open)
+            {
+                self.request_redraw();
+                return;
+            }
+            if let Some(elicit) = panel.elicitation_mut()
+                && elicit.focused_field.take().is_some()
+            {
+                self.ime.field_preedit.clear();
+                self.request_redraw();
+                return;
+            }
         }
         // 链接地址的补全列表开着时，选择、写入和关掉列表的键先给它。
         if self.focus == Focus::Agent
@@ -190,7 +200,16 @@ impl App {
                 if event.logical_key == Key::Named(NamedKey::Enter)
                     && self.ime.field_preedit.is_empty() =>
             {
-                if self.pointer.modifiers.shift_key() {
+                if self
+                    .agent
+                    .as_ref()
+                    .is_some_and(|panel| panel.elicitation_field_focused())
+                {
+                    if let Some(panel) = &mut self.agent {
+                        panel.submit_elicitation();
+                    }
+                    self.request_redraw();
+                } else if self.pointer.modifiers.shift_key() {
                     self.edit_field(|field| field.insert("\n"));
                 } else {
                     self.agent_send();

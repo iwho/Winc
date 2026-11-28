@@ -226,6 +226,8 @@ pub struct Config {
     pub terminal_enabled: Option<bool>,
     /// Enables the native Codex panel. Enabled by default and started on demand.
     pub agent_enabled: Option<bool>,
+    /// Whether to expand the execution process while a turn is running.
+    pub agent_expand_process: Option<bool>,
     /// Explicit path to the Codex executable, from user settings only.
     pub agent_executable: Option<String>,
     /// 终端的等宽字体，写法同 [`Config::editor_font`]；未设置时与编辑区相同。

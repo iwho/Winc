@@ -139,6 +139,8 @@ pub enum UserEvent {
     Agent,
     /// Validated a project-local path from a Codex reply.
     AgentPath(PathBuf, Option<PathBuf>, agent::Link, bool),
+    /// Background Git worktree listing or creation for the Agent panel completed.
+    AgentWorktrees,
     /// 打开或另存为面板已关闭；取消时路径为 `None`。
     Picked(Pick, Option<PathBuf>),
     /// 全局搜索产生了新结果，或已搜索完成。
@@ -662,7 +664,10 @@ impl Hover {
             self,
             Hover::TreeTool(_)
                 | Hover::TerminalHeader(
-                    terminal::HeaderHit::Position
+                    terminal::HeaderHit::New
+                        | terminal::HeaderHit::Close(_)
+                        | terminal::HeaderHit::SearchClose
+                        | terminal::HeaderHit::Position
                         | terminal::HeaderHit::SearchDialog
                         | terminal::HeaderHit::Maximize
                         | terminal::HeaderHit::Editor
@@ -690,6 +695,8 @@ impl Hover {
                 )
                 | Hover::Commit(CommitTarget::Generate)
                 | Hover::SidebarButton
+                | Hover::WindowControl(_)
+                | Hover::NewTab
                 | Hover::Tab(..)
                 | Hover::TabList
                 | Hover::Preview(_)
@@ -1017,6 +1024,7 @@ pub struct App {
     pub(crate) agent_peer: Option<Box<agent::Panel>>,
     pub(crate) agent_split: bool,
     pub(crate) agent_focus_right: bool,
+    pub(crate) agent_worktrees: agent::WorktreeChannel,
     /// 当前目录的运行配置。
     pub(crate) run: terminal::run::RunConfigs,
     /// 当前生效的配置。
@@ -1286,6 +1294,7 @@ impl App {
             UserEvent::Replaced => self.poll_replace_all(),
             UserEvent::Wrapped => self.poll_wraps(),
             UserEvent::Compared => self.poll_compares(),
+            UserEvent::AgentWorktrees => self.poll_agent_worktrees(),
             other => debug_assert!(false, "{other:?} 不是后台任务做完的事件"),
         }
     }
