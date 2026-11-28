@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 mod composer;
 mod editor;
 mod sessions;
+mod stream;
 pub(crate) use editor::Link;
 use sessions::Catalog;
 pub(crate) use sessions::Tab;
@@ -156,12 +157,6 @@ impl TextSelection {
     }
 }
 
-const STREAM_BASE_COLS_PER_SEC: f32 = 220.0;
-const STREAM_MAX_COLS_PER_SEC: f32 = 560.0;
-const STREAM_RAMP_THRESHOLD: f32 = 400.0;
-const STREAM_RAMP_GAIN: f32 = 0.25;
-const STREAM_NEWLINE_COLS: f32 = 12.0;
-
 struct BufferedDelta {
     turn: TurnKey,
     id: String,
@@ -177,16 +172,6 @@ impl BufferedDelta {
 
     fn remaining_len(&self) -> usize {
         self.text.len().saturating_sub(self.offset)
-    }
-}
-
-fn char_columns(ch: char) -> f32 {
-    if ch == '\n' {
-        STREAM_NEWLINE_COLS
-    } else if (ch as u32) >= 0x1100 {
-        2.0
-    } else {
-        1.0
     }
 }
 
@@ -208,6 +193,7 @@ pub(crate) struct Transcript {
     stream_bytes: usize,
     stream_last_tick: Option<Instant>,
     stream_budget: f32,
+    stream_hold: Option<stream::HoldState>,
 }
 
 impl Default for Transcript {
@@ -230,6 +216,7 @@ impl Default for Transcript {
             stream_bytes: 0,
             stream_last_tick: None,
             stream_budget: 0.0,
+            stream_hold: None,
         }
     }
 }
@@ -314,6 +301,7 @@ impl Transcript {
         self.stream_bytes = 0;
         self.stream_last_tick = None;
         self.stream_budget = 0.0;
+        self.stream_hold = None;
     }
 
     pub(crate) fn reset_follow_state(&mut self) {
@@ -441,7 +429,7 @@ impl Transcript {
         let mut cols = 0.0;
         for entry in &self.stream_queue {
             for ch in entry.remaining().chars() {
-                cols += char_columns(ch);
+                cols += stream::char_columns(ch);
                 if cols >= 8_000.0 {
                     return cols;
                 }
@@ -454,6 +442,7 @@ impl Transcript {
         if self.stream_queue.is_empty() {
             self.stream_last_tick = None;
             self.stream_budget = 0.0;
+            self.stream_hold = None;
             return false;
         }
         let dt = self
@@ -463,52 +452,81 @@ impl Transcript {
             });
         self.stream_last_tick = Some(now);
         let backlog = self.stream_backlog_cols();
-        let extra = (backlog - STREAM_RAMP_THRESHOLD).max(0.0) * STREAM_RAMP_GAIN;
-        let rate = (STREAM_BASE_COLS_PER_SEC + extra).clamp(
-            STREAM_BASE_COLS_PER_SEC,
-            STREAM_MAX_COLS_PER_SEC,
+        let extra =
+            (backlog - stream::STREAM_RAMP_THRESHOLD).max(0.0) * stream::STREAM_RAMP_GAIN;
+        let rate = (stream::STREAM_BASE_COLS_PER_SEC + extra).clamp(
+            stream::STREAM_BASE_COLS_PER_SEC,
+            stream::STREAM_MAX_COLS_PER_SEC,
         );
         self.stream_budget = (self.stream_budget + rate * dt).min(rate * 0.1);
         let mut released = false;
         while self.stream_budget >= 1.0 {
-            let Some(front) = self.stream_queue.front_mut() else {
+            let queue_len = self.stream_queue.len();
+            let Some((turn, id, kind, rest_len)) = self.stream_queue.front().map(|front| {
+                (
+                    front.turn.clone(),
+                    front.id.clone(),
+                    front.kind,
+                    front.remaining_len(),
+                )
+            }) else {
                 break;
             };
-            let rest = front.remaining();
-            if rest.is_empty() {
+            if rest_len == 0 {
                 self.stream_queue.pop_front();
+                self.stream_hold = None;
                 continue;
             }
-            let mut take_bytes = 0;
-            let mut spent = 0.0;
-            for (idx, ch) in rest.char_indices() {
-                let cost = char_columns(ch);
-                if take_bytes > 0 && spent + cost > self.stream_budget {
-                    break;
-                }
-                take_bytes = idx + ch.len_utf8();
-                spent += cost;
-                if spent >= self.stream_budget {
-                    break;
-                }
-            }
-            if take_bytes == 0 {
-                break;
-            }
-            let turn = front.turn.clone();
-            let id = front.id.clone();
-            let kind = front.kind;
-            let chunk = rest[..take_bytes].to_owned();
-            front.offset += take_bytes;
-            let drained = front.offset >= front.text.len();
-            if drained {
-                self.stream_queue.pop_front();
-            }
-            self.stream_bytes = self.stream_bytes.saturating_sub(take_bytes);
-            self.stream_budget -= spent;
             let is_finished = finished_turn == Some(&turn);
-            self.apply_delta(turn, id, kind, &chunk, is_finished);
-            released = true;
+            let allow_wait = !is_finished && queue_len == 1;
+            let ctx = if matches!(
+                kind,
+                DeltaKind::Message | DeltaKind::Commentary | DeltaKind::Plan
+            ) {
+                let revealed = self
+                    .indices
+                    .get(&(turn.clone(), id.clone()))
+                    .and_then(|&ordinal| self.cards.get(ordinal.saturating_sub(self.first)))
+                    .map(|card| card.item.text.as_str())
+                    .unwrap_or_default();
+                stream::LineContext::from_revealed(revealed)
+            } else {
+                stream::LineContext::plain_text()
+            };
+            let can_hold =
+                stream::HoldState::can_hold(&mut self.stream_hold, now, rest_len, allow_wait);
+            let plan = {
+                let front = self.stream_queue.front().expect("checked non-empty front");
+                stream::plan_chunk(front.remaining(), &ctx, self.stream_budget, can_hold)
+            };
+            match plan {
+                stream::ChunkPlan::Hold => {
+                    stream::HoldState::mark_held(&mut self.stream_hold, now, rest_len);
+                    break;
+                }
+                stream::ChunkPlan::Release { bytes, cost } => {
+                    if bytes == 0 {
+                        break;
+                    }
+                    let chunk = {
+                        let front = self
+                            .stream_queue
+                            .front_mut()
+                            .expect("checked non-empty front");
+                        let chunk = front.remaining()[..bytes].to_owned();
+                        front.offset += bytes;
+                        if front.offset >= front.text.len() {
+                            self.stream_queue.pop_front();
+                        }
+                        chunk
+                    };
+                    stream::HoldState::on_release(&mut self.stream_hold, bytes, &chunk);
+                    self.stream_bytes = self.stream_bytes.saturating_sub(bytes);
+                    self.stream_budget -= cost;
+                    self.apply_delta(turn, id, kind, &chunk, is_finished);
+                    released = true;
+                }
+            }
         }
         if released {
             self.arm_smooth_follow();
@@ -516,6 +534,7 @@ impl Transcript {
         if self.stream_queue.is_empty() {
             self.stream_last_tick = None;
             self.stream_budget = 0.0;
+            self.stream_hold = None;
         }
         released
     }
@@ -524,6 +543,7 @@ impl Transcript {
         if self.stream_queue.is_empty() {
             self.stream_last_tick = None;
             self.stream_budget = 0.0;
+            self.stream_hold = None;
             return false;
         }
         while let Some(front) = self.stream_queue.pop_front() {
@@ -534,6 +554,7 @@ impl Transcript {
         self.stream_bytes = 0;
         self.stream_last_tick = None;
         self.stream_budget = 0.0;
+        self.stream_hold = None;
         true
     }
 
@@ -541,9 +562,11 @@ impl Transcript {
         if self.stream_queue.is_empty() {
             return;
         }
+        let mut flushed_any = false;
         let mut kept = VecDeque::with_capacity(self.stream_queue.len());
         while let Some(entry) = self.stream_queue.pop_front() {
             if predicate(&entry) {
+                flushed_any = true;
                 let rest = entry.remaining();
                 self.stream_bytes = self.stream_bytes.saturating_sub(rest.len());
                 let is_finished = finished_turn == Some(&entry.turn);
@@ -553,6 +576,9 @@ impl Transcript {
             }
         }
         self.stream_queue = kept;
+        if flushed_any || self.stream_queue.is_empty() {
+            self.stream_hold = None;
+        }
         if self.stream_queue.is_empty() {
             self.stream_last_tick = None;
             self.stream_budget = 0.0;
@@ -579,6 +605,7 @@ impl Transcript {
             .and_then(|&ordinal| self.cards.get(ordinal.saturating_sub(self.first)))
             .map(|card| card.item.text.as_str())
             .unwrap_or_default();
+        self.stream_hold = None;
         if let Some(suffix) = item.text.strip_prefix(revealed) {
             let kind = match item.kind {
                 ItemKind::Commentary => DeltaKind::Commentary,
@@ -5318,7 +5345,7 @@ mod tests {
             now += Duration::from_millis(16);
             app.advance_agent_stream(now);
             ticks += 1;
-            assert!(ticks < 600, "stream buffer should finish in bounded time");
+            assert!(ticks < 1200, "stream buffer should finish in bounded time");
         }
         assert!(ticks > 5, "burst should span multiple frames, got {ticks}");
         let final_text = &app
@@ -5334,6 +5361,128 @@ mod tests {
             .text;
         assert_eq!(final_text, &burst);
         assert!(!app.agent_animating());
+    }
+
+    #[test]
+    fn markdown_link_holds_across_deltas_and_releases_atomically_without_stalling_on_unclosed() {
+        let (mut app, turn) = test_panel(0);
+        app.config.ui_animations = Some(true);
+        app.agent
+            .as_mut()
+            .unwrap()
+            .event(Event::TurnStarted(None, turn.clone()));
+
+        let card_text = |app: &mut App| {
+            app.agent
+                .as_mut()
+                .unwrap()
+                .transcript()
+                .unwrap()
+                .cards
+                .front()
+                .map(|c| c.item.text.clone())
+                .unwrap_or_default()
+        };
+
+        // 1. Prefix releases cleanly while incomplete link `[agent` is held.
+        app.agent.as_mut().unwrap().ingest_event(
+            Event::Delta(turn.clone(), "m1".into(), DeltaKind::Message, "请查看 [agent".into()),
+            true,
+        );
+        let mut now = Instant::now();
+        for _ in 0..5 {
+            now += Duration::from_millis(16);
+            app.advance_agent_stream(now);
+        }
+        assert_eq!(card_text(&mut app), "请查看 ");
+
+        // 2. Partial link target continues holding.
+        app.agent.as_mut().unwrap().ingest_event(
+            Event::Delta(
+                turn.clone(),
+                "m1".into(),
+                DeltaKind::Message,
+                ".rs](file:///C:/repo/agent".into(),
+            ),
+            true,
+        );
+        now += Duration::from_millis(16);
+        app.advance_agent_stream(now);
+        assert_eq!(card_text(&mut app), "请查看 ");
+
+        // 3. Closing `)` arrives: entire `[agent.rs](file:///C:/repo/agent.rs)` releases in one tick.
+        app.agent.as_mut().unwrap().ingest_event(
+            Event::Delta(
+                turn.clone(),
+                "m1".into(),
+                DeltaKind::Message,
+                ".rs) 的改动".into(),
+            ),
+            true,
+        );
+        let mut saw_atomic_link = false;
+        while app
+            .agent
+            .as_mut()
+            .unwrap()
+            .transcript()
+            .unwrap()
+            .has_stream_pending()
+        {
+            now += Duration::from_millis(16);
+            app.advance_agent_stream(now);
+            let revealed = card_text(&mut app);
+            if revealed.len() > "请查看 ".len() {
+                assert!(
+                    revealed.starts_with("请查看 [agent.rs](file:///C:/repo/agent.rs)"),
+                    "partial link leaked to UI: {revealed:?}"
+                );
+                saw_atomic_link = true;
+                break;
+            }
+        }
+        assert!(saw_atomic_link);
+        while app
+            .agent
+            .as_mut()
+            .unwrap()
+            .transcript()
+            .unwrap()
+            .has_stream_pending()
+        {
+            now += Duration::from_millis(16);
+            app.advance_agent_stream(now);
+        }
+        assert_eq!(card_text(&mut app), "请查看 [agent.rs](file:///C:/repo/agent.rs) 的改动");
+
+        // 4. Unclosed `[unclosed` falls back cleanly after STREAM_HOLD_IDLE_TIMEOUT.
+        app.agent.as_mut().unwrap().ingest_event(
+            Event::Delta(turn, "m1".into(), DeltaKind::Message, " [unclosed".into()),
+            true,
+        );
+        now += Duration::from_millis(16);
+        app.advance_agent_stream(now);
+        assert_eq!(card_text(&mut app), "请查看 [agent.rs](file:///C:/repo/agent.rs) 的改动 ");
+
+        for _ in 0..40 {
+            if !app
+                .agent
+                .as_mut()
+                .unwrap()
+                .transcript()
+                .unwrap()
+                .has_stream_pending()
+            {
+                break;
+            }
+            now += Duration::from_millis(16);
+            app.advance_agent_stream(now);
+        }
+        assert!(!app.agent.as_mut().unwrap().transcript().unwrap().has_stream_pending());
+        assert_eq!(
+            card_text(&mut app),
+            "请查看 [agent.rs](file:///C:/repo/agent.rs) 的改动 [unclosed"
+        );
     }
 
     #[test]
